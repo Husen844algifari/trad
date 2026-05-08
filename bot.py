@@ -9,9 +9,6 @@ load_dotenv()
 client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-# ════════════════════════════════════════════════════
-#  CONFIG
-# ════════════════════════════════════════════════════
 LEVERAGE         = 10
 ORDER_USDT       = 55
 ATR_SL_MULT      = 1.5
