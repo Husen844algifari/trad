@@ -7,17 +7,16 @@ import pandas as pd
 
 load_dotenv()
 client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
-client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 LEVERAGE         = 10
-ORDER_USDT       = 55
+ORDER_USDT       = 2
 ATR_SL_MULT      = 1.5
 ATR_TP_MULT      = 3.0
 TRAIL_TRIGGER    = 0.005
 TRAIL_PCT        = 0.003
 MIN_TA_VOTES     = 6
 MIN_FNG          = 35
-MAX_POSITIONS    = 2
+MAX_POSITIONS    = 1
 SCAN_INTERVAL    = 60
 
 SYMBOLS = [
