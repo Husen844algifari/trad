@@ -1,29 +1,9 @@
-"""
-Bot Trading v7 — Quality Over Quantity
-=======================================
-Filosofi: Lebih baik tidak trade daripada trade yang salah.
-Entry hanya ketika:
-  1. Market regime HTF (1H) searah
-  2. Fear & Greed >= 35 (tidak panik)
-  3. USDT.D tidak naik (tidak risk-off)
-  4. Minimal 6/10 sinyal teknikal konfirmasi
-  5. Candle 15m + 1H setuju arah
-  6. Order book & cumulative delta mendukung
-  7. Tidak ada berita buruk
-  8. Tunggu candle close (tidak entry di tengah candle)
-
-SL: dinamis pakai ATR (1.5x ATR dari entry)
-TP: 2x SL (RR 1:2)
-Trailing: aktif setelah profit > 0.5%
-"""
-
 import os, time, math, requests
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.enums import *
 import ta
 import pandas as pd
-import numpy as np
 
 load_dotenv()
 client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
@@ -34,32 +14,28 @@ client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 # ════════════════════════════════════════════════════
 LEVERAGE         = 10
 ORDER_USDT       = 55
-ATR_SL_MULT      = 1.5       # SL = 1.5x ATR
-ATR_TP_MULT      = 3.0       # TP = 3.0x ATR (RR 1:2)
-TRAIL_TRIGGER    = 0.005     # Aktifkan trailing setelah profit 0.5%
-TRAIL_PCT        = 0.003     # Trailing distance 0.3%
-MIN_TA_VOTES     = 6         # Minimal 6/10 TA votes
-MIN_FNG          = 35        # Skip kalau market terlalu takut
-MAX_POSITIONS    = 2         # Sangat selektif
-SCAN_INTERVAL    = 60        # detik
+ATR_SL_MULT      = 1.5
+ATR_TP_MULT      = 3.0
+TRAIL_TRIGGER    = 0.005
+TRAIL_PCT        = 0.003
+MIN_TA_VOTES     = 6
+MIN_FNG          = 35
+MAX_POSITIONS    = 2
+SCAN_INTERVAL    = 60
 
-# Top coins dengan likuiditas tinggi saja (lebih predictable)
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
     "ADAUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","DOTUSDT",
     "MATICUSDT","LTCUSDT","ATOMUSDT","UNIUSDT","ETCUSDT",
     "NEARUSDT","APTUSDT","ARBUSDT","OPUSDT","INJUSDT",
     "SUIUSDT","TIAUSDT","AAVEUSDT","RUNEUSDT","FILUSDT",
-    "AVAXUSDT","SOLUSDT","1000PEPEUSDT","WIFUSDT","JUPUSDT",
+    "1000PEPEUSDT","WIFUSDT","JUPUSDT",
 ]
 
 open_positions = {}
 trade_log      = []
-_last_candle   = {}   # track candle time supaya tidak entry 2x di candle sama
+_last_candle   = {}
 
-# ════════════════════════════════════════════════════
-#  UTILS
-# ════════════════════════════════════════════════════
 _sym_info = {}
 def get_sym_info(symbol):
     if symbol in _sym_info: return _sym_info[symbol]
@@ -95,15 +71,32 @@ def get_price(symbol):
 def validate_symbols():
     try:
         valid = {s["symbol"] for s in client.futures_exchange_info()["symbols"] if s["status"]=="TRADING"}
-        result = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))  # deduplicate
+        result = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))
         print(f"  ✅ {len(result)} symbols valid")
         return result
     except:
-        return SYMBOLS
+        return list(dict.fromkeys(SYMBOLS))
 
-# ════════════════════════════════════════════════════
-#  OHLCV
-# ════════════════════════════════════════════════════
+def get_exchange_amt(symbol, retries=3):
+    """
+    Coba 3x sebelum menyerah. Return None kalau semua gagal
+    (bukan 0) supaya bot tidak salah anggap posisi sudah tutup.
+    """
+    for attempt in range(retries):
+        try:
+            positions = client.futures_position_information(symbol=symbol)
+            for p in positions:
+                amt = float(p["positionAmt"])
+                if amt != 0:
+                    return amt
+            return 0   
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1)
+            else:
+                print(f"  ⚠️  [{symbol}] Gagal query posisi ({e}) — skip cycle ini")
+                return None  
+
 def get_ohlcv(symbol, interval, limit=200):
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
@@ -116,9 +109,6 @@ def get_ohlcv(symbol, interval, limit=200):
         return df
     except: return None
 
-# ════════════════════════════════════════════════════
-#  MACRO CACHE
-# ════════════════════════════════════════════════════
 _macro = {
     "fng":50, "fng_label":"Neutral",
     "usdt_d":5.0, "usdt_prev":5.0,
@@ -165,15 +155,7 @@ def refresh_macro():
             _macro["last_news"] = now
         except: pass
 
-# ════════════════════════════════════════════════════
-#  MARKET REGIME (1H)
-# ════════════════════════════════════════════════════
 def get_regime(symbol):
-    """
-    BULL  = EMA20 > EMA50 dan harga > EMA50 di 1H
-    BEAR  = EMA20 < EMA50 dan harga < EMA50 di 1H
-    RANGE = tidak jelas
-    """
     df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 60)
     if df is None or len(df) < 55: return "RANGE"
     c     = df["close"]
@@ -184,9 +166,6 @@ def get_regime(symbol):
     if ema20 < ema50 and price < ema50: return "BEAR"
     return "RANGE"
 
-# ════════════════════════════════════════════════════
-#  TECHNICAL ANALYSIS (15m)
-# ════════════════════════════════════════════════════
 def run_ta(df):
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
     df["rsi"]        = ta.momentum.RSIIndicator(c, 14).rsi()
@@ -211,33 +190,25 @@ def run_ta(df):
     df["vol_ma"]     = v.rolling(20).mean()
     df["vol_ratio"]  = v / df["vol_ma"].replace(0,1)
     df["buy_ratio"]  = df["tbbase"] / df["volume"].replace(0,1)
-    # Candle body strength
     df["body"]       = abs(df["close"] - df["open"])
     df["range_"]     = df["high"] - df["low"]
     df["body_ratio"] = df["body"] / df["range_"].replace(0,1)
     return df
 
 def get_ta_votes(df, regime):
-    """
-    10 votes. Kita butuh MIN_TA_VOTES (6) ke satu arah.
-    Setiap vote adalah kondisi yang independent.
-    """
     last = df.iloc[-1]
     prev = df.iloc[-2]
     p2   = df.iloc[-3]
     long_v = short_v = 0
 
-    # 1. RSI zone
     rsi = last["rsi"]
     if rsi < 35:   long_v  += 1
     elif rsi > 65: short_v += 1
 
-    # 2. RSI fast momentum
     rf = last["rsi_fast"]
     if rf < 30:   long_v  += 1
     elif rf > 70: short_v += 1
 
-    # 3. MACD crossover (harus fresh — terjadi di 2 candle terakhir)
     if (last["macd"] > last["macd_sig"] and prev["macd"] <= prev["macd_sig"]) or \
        (prev["macd"] > prev["macd_sig"] and p2["macd"] <= p2["macd_sig"]):
         long_v += 1
@@ -245,45 +216,36 @@ def get_ta_votes(df, regime):
          (prev["macd"] < prev["macd_sig"] and p2["macd"] >= p2["macd_sig"]):
         short_v += 1
 
-    # 4. EMA stack (9>21>50 = bullish, 9<21<50 = bearish)
-    if last["ema9"] > last["ema21"] > last["ema50"]:  long_v  += 1
+    if last["ema9"] > last["ema21"] > last["ema50"]:   long_v  += 1
     elif last["ema9"] < last["ema21"] < last["ema50"]: short_v += 1
 
-    # 5. Price vs EMA200
     if not pd.isna(last["ema200"]):
         if last["close"] > last["ema200"]: long_v  += 1
         else:                              short_v += 1
 
-    # 6. Bollinger Band position
     price = last["close"]
     if price <= last["bb_lo"] * 1.002:   long_v  += 1
     elif price >= last["bb_hi"] * 0.998: short_v += 1
 
-    # 7. Stochastic (harus crossover, bukan cuma di zone)
-    k, d = last["stk"], last["std"]
+    k, d   = last["stk"], last["std"]
     pk, pd_ = prev["stk"], prev["std"]
     if k < 25 and k > d and pk <= pd_:   long_v  += 1
     elif k > 75 and k < d and pk >= pd_: short_v += 1
 
-    # 8. Taker buy ratio
     br = last["buy_ratio"]
     if br > 0.60:   long_v  += 1
     elif br < 0.40: short_v += 1
 
-    # 9. Volume konfirmasi (harus ada volume)
     if last["vol_ratio"] > 1.2:
         if last["close"] > last["open"]: long_v  += 1
         else:                            short_v += 1
 
-    # 10. Candle body kuat (bukan doji/spinning top)
     if last["body_ratio"] > 0.6:
         if last["close"] > last["open"]: long_v  += 1
         else:                            short_v += 1
 
-    # Penalti kalau berlawanan dengan regime HTF
     if regime == "BULL" and short_v > long_v:   return "NONE", long_v, short_v
     if regime == "BEAR" and long_v  > short_v:  return "NONE", long_v, short_v
-    # Skip RANGE kecuali sinyal sangat kuat
     if regime == "RANGE" and max(long_v,short_v) < 7: return "NONE", long_v, short_v
 
     if long_v >= MIN_TA_VOTES and long_v > short_v + 1:
@@ -292,9 +254,6 @@ def get_ta_votes(df, regime):
         return "SHORT", long_v, short_v
     return "NONE", long_v, short_v
 
-# ════════════════════════════════════════════════════
-#  ORDER BOOK + CUMULATIVE DELTA
-# ════════════════════════════════════════════════════
 def get_ob_imbalance(symbol):
     try:
         ob    = client.futures_order_book(symbol=symbol, limit=50)
@@ -307,14 +266,12 @@ def get_ob_imbalance(symbol):
 def get_cum_delta(df, lookback=10):
     if len(df) < lookback: return 0.0
     recent = df.tail(lookback).copy()
+    recent = recent.copy()
     recent["delta"] = recent["tbbase"] - (recent["volume"] - recent["tbbase"])
-    cum = recent["delta"].sum()
+    cum  = recent["delta"].sum()
     norm = cum / (recent["volume"].sum() + 1)
     return round(norm, 3)
 
-# ════════════════════════════════════════════════════
-#  WHALE DETECTION
-# ════════════════════════════════════════════════════
 def detect_whale(df):
     last   = df.iloc[-1]
     vol_ma = df["vol_ma"].iloc[-1]
@@ -326,40 +283,18 @@ def detect_whale(df):
         return ("mild_buy" if last["close"] > last["open"] else "mild_sell"), ratio
     return "none", ratio
 
-# ════════════════════════════════════════════════════
-#  FUTURES SENTIMENT
-# ════════════════════════════════════════════════════
 def get_funding(symbol):
     try:
         data = client.futures_funding_rate(symbol=symbol, limit=1)
         return round(float(data[0]["fundingRate"])*100, 4)
     except: return 0.0
 
-def get_ls_ratio(symbol):
-    try:
-        url  = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={symbol}&period=5m&limit=2"
-        data = requests.get(url, timeout=5).json()
-        return float(data[0]["longShortRatio"])
-    except: return 1.0
-
-# ════════════════════════════════════════════════════
-#  MASTER ENTRY FILTER
-# ════════════════════════════════════════════════════
 def should_enter(symbol, df):
-    """
-    Return: (side, sl_price, tp_price, reason_dict) atau (None, 0, 0, {})
-    Semua filter harus lolos sebelum entry.
-    """
     info = {}
 
-    # ── Macro filters (hard block) ────────────────────────────
-    fng  = _macro["fng"]
-    news = _macro["news"]
+    fng     = _macro["fng"]
+    news    = _macro["news"]
     usdt_up = _macro["usdt_d"] > _macro["usdt_prev"]
-
-    info["fng"]    = fng
-    info["news"]   = news
-    info["usdt_d"] = _macro["usdt_d"]
 
     if fng < MIN_FNG:
         return None, 0, 0, {"skip":"Fear terlalu tinggi"}
@@ -368,70 +303,56 @@ def should_enter(symbol, df):
     if usdt_up:
         return None, 0, 0, {"skip":"USDT.D naik (risk-off)"}
 
-    # ── Market Regime ─────────────────────────────────────────
     regime = get_regime(symbol)
     info["regime"] = regime
-    # Boleh trade di semua regime tapi sinyal harus lebih kuat di RANGE
 
-    # ── Candle timing — tunggu candle yang sudah close ────────
-    last_candle_time = int(df["time"].iloc[-1])
     prev_candle_time = int(df["time"].iloc[-2])
-    # Kita analisa berdasarkan candle CLOSED (pakai candle ke-2 dari belakang)
-    # Supaya tidak entry di tengah candle yang belum selesai
-    df_closed = df.iloc[:-1].copy()  # drop candle yang belum close
-    if len(df_closed) < 60: return None, 0, 0, {"skip":"Data tidak cukup"}
+    df_closed = df.iloc[:-1].copy()
+    if len(df_closed) < 60:
+        return None, 0, 0, {"skip":"Data tidak cukup"}
 
-    # Jangan entry 2x di candle yang sama
     if _last_candle.get(symbol) == prev_candle_time:
         return None, 0, 0, {"skip":"Sudah dianalisa di candle ini"}
 
-    # ── Technical Analysis ────────────────────────────────────
     df_closed = run_ta(df_closed)
     ta_dir, lv, sv = get_ta_votes(df_closed, regime)
     info["ta"] = f"{ta_dir} L:{lv}/S:{sv}"
     if ta_dir == "NONE":
         return None, 0, 0, {"skip":f"TA tidak konfirmasi (L:{lv} S:{sv})"}
 
-    # ── Order Book ────────────────────────────────────────────
     ob_imb = get_ob_imbalance(symbol)
     info["ob"] = ob_imb
     if ta_dir == "LONG"  and ob_imb < -0.1:
-        return None, 0, 0, {"skip":f"OB melawan LONG ({ob_imb:.2f})"}
+        return None, 0, 0, {"skip":f"OB melawan LONG"}
     if ta_dir == "SHORT" and ob_imb > 0.1:
-        return None, 0, 0, {"skip":f"OB melawan SHORT ({ob_imb:.2f})"}
+        return None, 0, 0, {"skip":f"OB melawan SHORT"}
 
-    # ── Cumulative Delta ──────────────────────────────────────
     cum_d = get_cum_delta(df_closed)
     info["cum_delta"] = cum_d
     if ta_dir == "LONG"  and cum_d < -0.15:
-        return None, 0, 0, {"skip":f"CumDelta bearish ({cum_d:.3f})"}
+        return None, 0, 0, {"skip":f"CumDelta bearish"}
     if ta_dir == "SHORT" and cum_d > 0.15:
-        return None, 0, 0, {"skip":f"CumDelta bullish ({cum_d:.3f})"}
+        return None, 0, 0, {"skip":f"CumDelta bullish"}
 
-    # ── Whale check ───────────────────────────────────────────
     whale_dir, whale_ratio = detect_whale(df_closed)
     info["whale"] = f"{whale_dir}({whale_ratio:.1f}x)"
-    # Kalau ada whale berlawanan, skip
-    if ta_dir == "LONG"  and whale_dir in ("sell_whale",):
+    if ta_dir == "LONG"  and whale_dir == "sell_whale":
         return None, 0, 0, {"skip":"Whale sell aktif"}
-    if ta_dir == "SHORT" and whale_dir in ("buy_whale",):
+    if ta_dir == "SHORT" and whale_dir == "buy_whale":
         return None, 0, 0, {"skip":"Whale buy aktif"}
 
-    # ── Funding Rate ──────────────────────────────────────────
     funding = get_funding(symbol)
     info["funding"] = funding
     if ta_dir == "LONG"  and funding >  0.1:
-        return None, 0, 0, {"skip":f"Funding terlalu positif ({funding}%), potensi long squeeze"}
+        return None, 0, 0, {"skip":f"Funding terlalu positif"}
     if ta_dir == "SHORT" and funding < -0.1:
-        return None, 0, 0, {"skip":f"Funding terlalu negatif ({funding}%), potensi short squeeze"}
+        return None, 0, 0, {"skip":f"Funding terlalu negatif"}
 
-    # ── Bollinger Width — skip kalau market terlalu choppy ────
     bb_width = df_closed["bb_width"].iloc[-1]
     info["bb_width"] = round(bb_width, 4)
     if bb_width < 0.01:
-        return None, 0, 0, {"skip":f"BB terlalu sempit ({bb_width:.4f}), market choppy"}
+        return None, 0, 0, {"skip":f"BB terlalu sempit, market choppy"}
 
-    # ── ATR-based SL/TP ───────────────────────────────────────
     atr   = df_closed["atr"].iloc[-1]
     price = df_closed["close"].iloc[-1]
     if ta_dir == "LONG":
@@ -441,27 +362,13 @@ def should_enter(symbol, df):
         sl_price = round(price + ATR_SL_MULT * atr, 8)
         tp_price = round(price - ATR_TP_MULT * atr, 8)
 
-    # SL tidak boleh terlalu besar (> 3% dari harga)
     sl_pct = abs(price - sl_price) / price
     if sl_pct > 0.03:
-        return None, 0, 0, {"skip":f"ATR terlalu besar (SL={sl_pct*100:.1f}%), pasar terlalu volatile"}
+        return None, 0, 0, {"skip":f"ATR terlalu besar (SL={sl_pct*100:.1f}%)"}
 
-    # Mark candle ini sudah dianalisa
     _last_candle[symbol] = prev_candle_time
-
     info["atr_sl_pct"] = f"{sl_pct*100:.2f}%"
     return ta_dir, sl_price, tp_price, info
-
-# ════════════════════════════════════════════════════
-#  POSITION MANAGEMENT
-# ════════════════════════════════════════════════════
-def get_exchange_amt(symbol):
-    try:
-        for p in client.futures_position_information(symbol=symbol):
-            amt = float(p["positionAmt"])
-            if amt != 0: return amt
-        return 0
-    except: return 0
 
 def open_trade(symbol, side, sl_price, tp_price, info):
     try:
@@ -472,7 +379,7 @@ def open_trade(symbol, side, sl_price, tp_price, info):
             symbol=symbol,
             side=SIDE_BUY if side=="LONG" else SIDE_SELL,
             type=ORDER_TYPE_MARKET, quantity=qty)
-        entry = get_price(symbol)
+        entry    = get_price(symbol)
         trail_sl = entry*(1-TRAIL_PCT) if side=="LONG" else entry*(1+TRAIL_PCT)
         open_positions[symbol] = {
             "side":side, "entry":entry, "qty":qty,
@@ -489,37 +396,68 @@ def open_trade(symbol, side, sl_price, tp_price, info):
         print(f"  ❌ [{symbol}] Gagal entry: {e}")
 
 def close_trade(symbol, reason=""):
+    """
+    Close posisi. Kalau exchange query gagal, tetap catat di log
+    tapi jangan hapus dari open_positions supaya dicoba lagi.
+    """
     try:
         amt = get_exchange_amt(symbol)
+
+        if amt is None:
+            print(f"  ⚠️  [{symbol}] Tidak bisa query exchange, tunda close")
+            return False
+
         if amt == 0:
-            open_positions.pop(symbol, None)
-            return
+            if symbol in open_positions:
+                pos = open_positions[symbol]
+                exit_ = get_price(symbol)
+                if exit_ > 0:
+                    pnl = (exit_-pos["entry"])*pos["qty"] if pos["side"]=="LONG" \
+                          else (pos["entry"]-exit_)*pos["qty"]
+                    pct = pnl/(pos["entry"]*pos["qty"])*100
+                    emoji = "🟢" if pnl>=0 else "🔴"
+                    print(f"  ⚠️  [{symbol}] Posisi sudah tutup di exchange (liquidasi/manual?)")
+                    print(f"     {emoji} Est P&L: {pnl:+.4f} USDT ({pct:+.2f}%)")
+                    trade_log.append({"symbol":symbol,"side":pos["side"],
+                                      "pnl":round(pnl,4),"reason":"External close"})
+                open_positions.pop(symbol, None)
+            return True
+
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if amt>0 else SIDE_BUY,
             type=ORDER_TYPE_MARKET, quantity=abs(amt), reduceOnly=True)
+
         if symbol in open_positions:
             pos   = open_positions[symbol]
             exit_ = get_price(symbol)
-            pnl   = (exit_-pos["entry"])*pos["qty"] if pos["side"]=="LONG" else (pos["entry"]-exit_)*pos["qty"]
+            pnl   = (exit_-pos["entry"])*pos["qty"] if pos["side"]=="LONG" \
+                    else (pos["entry"]-exit_)*pos["qty"]
             pct   = pnl/(pos["entry"]*pos["qty"])*100
             emoji = "🟢" if pnl>=0 else "🔴"
             print(f"  💰 [{symbol}] CLOSED — {reason}")
             print(f"     {emoji} P&L: {pnl:+.4f} USDT ({pct:+.2f}%)")
-            trade_log.append({"symbol":symbol,"side":pos["side"],"pnl":round(pnl,4),"reason":reason})
+            trade_log.append({"symbol":symbol,"side":pos["side"],
+                              "pnl":round(pnl,4),"reason":reason})
         open_positions.pop(symbol, None)
+        return True
+
     except Exception as e:
-        print(f"  ❌ [{symbol}] Gagal close: {e}")
+        print(f"  ❌ [{symbol}] Gagal close: {e} — akan dicoba lagi")
+        return False
 
 def manage_positions():
     for symbol in list(open_positions.keys()):
         pos   = open_positions[symbol]
         price = get_price(symbol)
-        if price == 0: continue
+
+        if price == 0:
+            print(f"  ⚠️  [{symbol}] Tidak bisa get price, skip cycle ini")
+            continue
+
         entry = pos["entry"]
         side  = pos["side"]
 
-        # Emergency exit — news buruk
         if _macro["news"] == "negative":
             close_trade(symbol, "📰 Emergency — bad news")
             continue
@@ -527,18 +465,15 @@ def manage_positions():
         if side == "LONG":
             profit_pct = (price - entry) / entry
 
-            # Aktifkan trailing setelah profit cukup
             if profit_pct >= TRAIL_TRIGGER and not pos["trailing_active"]:
                 pos["trailing_active"] = True
                 pos["trail_sl"] = price * (1 - TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif @ {price:.5f}")
+                print(f"  🔄 [{symbol}] Trailing aktif @ {price:.5f} (profit {profit_pct*100:.2f}%)")
 
-            # Update trailing stop
             if pos["trailing_active"] and price > pos["peak"]:
                 pos["peak"]     = price
                 pos["trail_sl"] = price * (1 - TRAIL_PCT)
 
-            # Check exits
             if price >= pos["tp"]:
                 close_trade(symbol, f"✨ TAKE PROFIT"); continue
             if pos["trailing_active"] and price <= pos["trail_sl"]:
@@ -546,13 +481,17 @@ def manage_positions():
             if price <= pos["sl"]:
                 close_trade(symbol, f"🛑 STOP LOSS"); continue
 
-        else:  # SHORT
+            pnl_now = (price - entry) * pos["qty"]
+            trail_info = f" | Trail SL:{pos['trail_sl']:.5f}" if pos["trailing_active"] else ""
+            print(f"  📌 [{symbol}] LONG @{entry:.5f} now:{price:.5f} | P&L:{pnl_now:+.4f}{trail_info}")
+
+        else:  
             profit_pct = (entry - price) / entry
 
             if profit_pct >= TRAIL_TRIGGER and not pos["trailing_active"]:
                 pos["trailing_active"] = True
                 pos["trail_sl"] = price * (1 + TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif @ {price:.5f}")
+                print(f"  🔄 [{symbol}] Trailing aktif @ {price:.5f} (profit {profit_pct*100:.2f}%)")
 
             if pos["trailing_active"] and price < pos["peak"]:
                 pos["peak"]     = price
@@ -565,6 +504,10 @@ def manage_positions():
             if price >= pos["sl"]:
                 close_trade(symbol, f"🛑 STOP LOSS"); continue
 
+            pnl_now = (entry - price) * pos["qty"]
+            trail_info = f" | Trail SL:{pos['trail_sl']:.5f}" if pos["trailing_active"] else ""
+            print(f"  📌 [{symbol}] SHORT @{entry:.5f} now:{price:.5f} | P&L:{pnl_now:+.4f}{trail_info}")
+
 def print_summary():
     if not trade_log: return
     total = sum(t["pnl"] for t in trade_log)
@@ -572,42 +515,37 @@ def print_summary():
     n     = len(trade_log)
     wr    = wins/n*100 if n else 0
     print(f"\n  📊 {n} trades | WR:{wr:.0f}% W:{wins} L:{n-wins} | P&L:{total:+.4f} USDT")
-    # Tampilkan 3 trade terakhir
     for t in trade_log[-3:]:
         e = "🟢" if t["pnl"]>0 else "🔴"
-        print(f"     {e} {t['symbol']} {t['side']} {t['pnl']:+.4f} USDT — {t['reason'][:30]}")
+        print(f"     {e} {t['symbol']} {t['side']} {t['pnl']:+.4f} USDT — {t['reason'][:35]}")
 
-# ════════════════════════════════════════════════════
-#  MAIN LOOP
-# ════════════════════════════════════════════════════
 def run_bot():
-    print("🤖 Bot v7 — Quality Over Quantity")
+    print("🤖 Bot v7 Fix — Quality Over Quantity")
     print(f"   Leverage   : {LEVERAGE}x | Order: ${ORDER_USDT} USDT margin")
     print(f"   SL/TP      : {ATR_SL_MULT}x/{ATR_TP_MULT}x ATR (RR 1:2, dinamis)")
     print(f"   Trailing   : aktif setelah +{TRAIL_TRIGGER*100}% profit")
-    print(f"   Min Votes  : {MIN_TA_VOTES}/10 TA harus konfirmasi")
-    print(f"   Min F&G    : {MIN_FNG} (skip kalau terlalu takut)")
-    print(f"   Max Posisi : {MAX_POSITIONS} (sangat selektif)\n")
+    print(f"   Min Votes  : {MIN_TA_VOTES}/10 | Min F&G: {MIN_FNG}")
+    print(f"   Max Posisi : {MAX_POSITIONS}\n")
 
     print("  ⏳ Setup...")
     symbols = validate_symbols()
     for s in symbols: get_sym_info(s)
     refresh_macro()
-    print(f"  ✅ {len(symbols)} symbols siap | F&G:{_macro['fng']} | News:{_macro['news']}\n")
+    print(f"  ✅ {len(symbols)} symbols | F&G:{_macro['fng']} | News:{_macro['news']}\n")
 
     cycle = 0
     while True:
         cycle += 1
         refresh_macro()
-        manage_positions()
+        manage_positions()   
 
         print(f"\n{'='*66}")
-        print(f"  🔄 #{cycle} {time.strftime('%H:%M:%S')} | F&G:{_macro['fng']}({_macro['fng_label']}) | USDT.D:{_macro['usdt_d']}% | News:{_macro['news']}")
+        print(f"  🔄 #{cycle} {time.strftime('%H:%M:%S')} | F&G:{_macro['fng']}({_macro['fng_label']}) | USDT:{_macro['usdt_d']}% | News:{_macro['news']}")
         for h in _macro["headlines"]: print(f"  {h}")
         print(f"  📂 Posisi({len(open_positions)}): {list(open_positions.keys()) or '-'}")
         print(f"{'='*66}")
 
-        skipped = 0
+        skipped    = 0
         candidates = []
 
         if len(open_positions) < MAX_POSITIONS and _macro["news"] != "negative":
@@ -617,29 +555,23 @@ def run_bot():
                 if df is None or len(df) < 70: continue
 
                 side, sl, tp, info = should_enter(symbol, df)
-
                 if side:
                     candidates.append((symbol, side, sl, tp, info))
                 else:
                     skipped += 1
 
-            # Pilih candidate terbaik berdasarkan OB imbalance terkuat
             if candidates:
                 candidates.sort(key=lambda x: abs(x[4].get("ob",0)), reverse=True)
                 print(f"\n  🎯 {len(candidates)} setup valid | {skipped} di-skip")
                 for sym, side, sl, tp, info in candidates[:3]:
                     print(f"     ⭐ {sym} {side} | {info.get('ta','?')} | OB:{info.get('ob',0):+.2f} | regime:{info.get('regime','?')}")
-                # Enter hanya yang terbaik
                 for sym, side, sl, tp, info in candidates:
                     if len(open_positions) >= MAX_POSITIONS: break
                     open_trade(sym, side, sl, tp, info)
             else:
-                if skipped > 0:
-                    print(f"  ⏳ {skipped} coins di-scan, belum ada setup yang valid")
-                else:
-                    print(f"  ⏳ Scanning...")
+                print(f"  ⏳ {skipped} coins di-scan, belum ada setup valid")
         else:
-            print(f"  ⏸️  Posisi penuh atau kondisi tidak aman untuk entry baru")
+            print(f"  ⏸️  Posisi penuh atau kondisi tidak aman")
 
         print_summary()
         print(f"\n  ⏱️  {SCAN_INTERVAL}s...")
