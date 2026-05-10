@@ -94,7 +94,7 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 # ════════════════════════════════════════════════════
 
 # ── CORE SETTINGS ────────────────────────────────────────────────
-LEVERAGE              = 20
+LEVERAGE              = 10
 ORDER_USDT            = 1           # $10 per trade
 MAX_POSITIONS         = 1            # ✅ MAX 3 POSISI (fokus kualitas!)
 PRE_SCAN_CANDIDATES   = 5            # selalu siapkan 5 kandidat di antrian
