@@ -1,37 +1,45 @@
 """
-Bot Trading v9 — Fixed Edition
-================================
-Perbaikan dari v9 original:
+Bot Scalping v10 — 1H Bias + 15m/5m Entry
+==========================================
 
-FIX 1 — RATE LIMIT (28 simbol × 60 detik):
-  - Scan dibagi batch kecil (BATCH_SIZE simbol per cycle)
-  - Round-robin: tiap cycle scan batch berikutnya, bukan semua sekaligus
-  - OHLCV di-cache selama 1 candle period (14 detik buffer)
-    → kalau candle belum tutup, pakai data cached, hemat API call
-  - Delay kecil antar simbol (SCAN_DELAY_MS) untuk hindari burst
+ARSITEKTUR SCALPING:
+  ┌─────────────┐
+  │  1H Candle  │  → Tentukan BIAS (BULL / BEAR / SIDEWAYS)
+  │  (Filter)   │    → Hanya LONG kalau 1H BULL, SHORT kalau 1H BEAR
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │ 15m Candle  │  → Konfirmasi SETUP (RSI, MACD, EMA Stack, Volume)
+  │  (Setup)    │    → Score ≥ MIN_SCORE → lanjut ke 5m
+  └──────┬──────┘
+         │
+  ┌──────▼──────┐
+  │  5m Candle  │  → TRIGGER ENTRY (breakout mini, engulfing, RSI bounce)
+  │  (Entry)    │    → Entry instan kalau ≥ 2 sinyal confirm
+  └─────────────┘
 
-FIX 2 — VOLUME SPIKE NOISE (threshold flat 1.5x tidak cukup):
-  - Threshold volume spike kini adaptif: base 1.5x dinaikkan
-    proporsional ke ATR% simbol (simbol volatile butuh spike lebih besar)
-  - Formula: min_spike = BASE_VOL_SPIKE + (atr_pct / ATR_VOL_SCALE)
-  - Contoh: BTCUSDT ATR 0.5% → min_spike 1.5x; DOGEUSDT ATR 3% → min_spike ~2.5x
-  - Tambahan: volume spike harus konsisten di ≥2 dari 3 candle terakhir
-    (bukan cukup 1 candle saja) untuk filter noise lebih ketat
+SCALPING SETTINGS:
+  - Target TP1: 0.8% (cepat ambil profit)
+  - Target TP2: 1.5% (trailing)
+  - SL: 0.5-0.8% max (tight stop)
+  - Leverage: 15x (lebih agresif)
+  - Holding time ideal: 5-20 menit per trade
+  - Scan interval: 30 detik (lebih sering)
 
-FIX 3 — FUNDING RATE (1 data, threshold terlalu kecil):
-  - Ambil 8 data terakhir (1 sesi penuh = 8 jam × 1 data/jam di beberapa exchange)
-    → gunakan rata-rata 3 funding rate terakhir untuk smooth outlier
-  - Threshold dinaikkan: 0.05% → 0.08% (lebih kebal noise)
-  - Tambah "funding trend": kalau funding makin naik (positif semakin besar),
-    ini sinyal crowding LONG yang lebih kuat → penalti lebih besar
+LOGIKA PROFIT HUNTING:
+  - Kalau market sideways → cari mean-reversion (BB bounce + RSI extremes)
+  - Kalau market trending → cari momentum continuation (EMA pullback)
+  - Kalau volatility tinggi → filter ketat (ATR filter)
+  - Kalau volatility rendah → cari breakout setup
 
-FIX 4 — BTC EMERGENCY EXIT (lambat karena tunggu 1H+4H):
-  - Tambah Flash Crash Detector: cek pergerakan BTC % dalam window pendek
-    tanpa perlu tunggu candle 1H/4H closed
-  - FLASH_CRASH_PCT: kalau BTC turun ≥ X% dalam 5 menit terakhir → emergency exit LONG
-  - FLASH_PUMP_PCT: kalau BTC naik ≥ X% dalam 5 menit → emergency exit SHORT
-  - Flash detector jalan di manage_positions() setiap iterasi (independen dari macro refresh)
-  - 1H+4H filter tetap ada untuk exit normal, flash detector hanya untuk kondisi ekstrem
+PERBAIKAN DARI v9:
+  1. Timeframe hierarchy 1H→15m→5m (bukan cuma 15m)
+  2. Scan interval 30s (bukan 60s)
+  3. TP target lebih kecil tapi lebih cepat tercapai
+  4. Entry trigger berbasis 5m: engulfing + RSI bounce + breakout
+  5. Market regime detector yang lebih cepat (EMA9/21 di 15m)
+  6. Dynamic position sizing berdasarkan volatilitas saat ini
+  7. Scalp mode: saat BTC sideways, aktifkan mean-reversion mode
 """
 
 import os, time, math, json, requests
@@ -41,6 +49,7 @@ from binance.client import Client
 from binance.enums import *
 import ta
 import pandas as pd
+import numpy as np
 
 load_dotenv()
 client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
@@ -48,69 +57,62 @@ client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 # ════════════════════════════════════════════════════
-#  CONFIG
+#  CONFIG SCALPING
 # ════════════════════════════════════════════════════
-LEVERAGE              = 10
-ORDER_USDT            = 55
-ATR_SL_MULT           = 2.0
-ATR_TP1_MULT          = 2.0
-ATR_TP2_MULT          = 4.0
-TRAIL_TRIGGER         = 0.005
-TRAIL_PCT             = 0.003
-MIN_COMPOSITE_SCORE   = 62
-MIN_FNG               = 45
-MAX_FNG_LONG          = 85
-MIN_FNG_ANY           = 20
-MAX_POSITIONS         = 2
-SCAN_INTERVAL         = 60
-MAX_CONSEC_LOSS       = 2
-MIN_MARKET_BREADTH    = 0.45
-SR_BUFFER             = 0.008
+LEVERAGE              = 15           # lebih agresif untuk scalp
+ORDER_USDT            = 50           # per trade
+MAX_POSITIONS         = 3            # bisa hold lebih banyak karena holding time pendek
+
+# ── TP/SL Scalping (lebih ketat) ─────────────────────────────────────────────
+ATR_SL_MULT           = 1.2          # SL lebih ketat (v9: 2.0)
+ATR_TP1_MULT          = 1.0          # TP1 cepat (v9: 2.0)
+ATR_TP2_MULT          = 2.0          # TP2 trailing (v9: 4.0)
+MAX_SL_PCT            = 0.008        # maksimum SL 0.8% dari entry
+MIN_RR                = 1.2          # min risk:reward ratio
+
+# ── Trailing ─────────────────────────────────────────────────────────────────
+TRAIL_TRIGGER         = 0.003        # aktifkan trailing setelah profit 0.3%
+TRAIL_PCT             = 0.002        # trailing distance 0.2%
+
+# ── Score & Filter ───────────────────────────────────────────────────────────
+MIN_COMPOSITE_SCORE   = 55           # lebih rendah dari v9 (62) → lebih banyak entry
+MIN_5M_SIGNALS        = 2            # minimal sinyal konfirmasi di 5m
+MIN_FNG               = 30           # toleransi lebih rendah
+MAX_FNG_LONG          = 88
+MIN_FNG_ANY           = 15
+MIN_MARKET_BREADTH    = 0.40
+
+# ── Timing ───────────────────────────────────────────────────────────────────
+SCAN_INTERVAL         = 30           # scan tiap 30 detik (v9: 60s)
+BATCH_SIZE            = 5            # simbol per batch
+SCAN_DELAY_MS         = 0.08         # 80ms antar call
+OHLCV_CACHE_TTL_5M    = 25           # cache 5m candle 25 detik
+OHLCV_CACHE_TTL_15M   = 55           # cache 15m candle 55 detik
+OHLCV_CACHE_TTL_1H    = 3500         # cache 1H candle ~58 menit
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+SR_BUFFER             = 0.005        # lebih ketat (v9: 0.008)
 USDT_RISK_OFF_DELTA   = 0.03
+MAX_CONSEC_LOSS       = 3            # cooldown setelah 3 loss (v9: 2, lebih toleran karena scalp)
+MAX_HOLDING_MINUTES   = 45           # force close kalau masih buka setelah X menit
+FLASH_CRASH_PCT       = 1.0          # lebih sensitif (v9: 1.2%)
+FLASH_PUMP_PCT        = 1.0
+FLASH_WINDOW_SEC      = 300
 
-# ── FIX 1: Batch scan & OHLCV cache ──────────────────────────────────────────
-BATCH_SIZE            = 7        # scan N simbol per cycle (28 simbol → 4 cycle = ~4 menit untuk full scan)
-SCAN_DELAY_MS         = 0.12     # detik jeda antar symbol API call (120ms = ~8 call/detik, aman di bawah limit)
-OHLCV_CACHE_TTL       = 55       # detik: cache OHLCV 15m selama 55 detik (1 candle = 60 detik)
-_ohlcv_cache          = {}       # {(symbol, interval): (timestamp_fetch, df)}
-_ohlcv_errors         = {}       # {(symbol, interval): error_msg} — dikumpul, ditampilkan di header
-_scan_batch_idx       = 0        # index batch saat ini (round-robin)
+# ── Funding ──────────────────────────────────────────────────────────────────
+FUNDING_LOOKBACK      = 3
+FUNDING_THRESHOLD     = 0.07
 
-# ── FIX 2: Adaptive volume spike ─────────────────────────────────────────────
-BASE_VOL_SPIKE        = 1.5      # minimum base (sama dengan v9 original)
-ATR_VOL_SCALE         = 1.2      # tiap 1% ATR → +0.83 threshold spike
-                                 # contoh: ATR 2% → threshold = 1.5 + (2/1.2) = 3.17x
-VOL_SPIKE_MIN_CANDLES = 2        # wajib ada spike di ≥2 dari 3 candle terakhir
+# ── Adaptive Volume ──────────────────────────────────────────────────────────
+BASE_VOL_SPIKE        = 1.3          # lebih rendah dari v9 (1.5) → lebih sensitif
+ATR_VOL_SCALE         = 1.5
+VOL_SPIKE_MIN_CANDLES = 1            # cukup 1 candle di scalp (v9: 2)
 
-# ── FIX 3: Funding rate average ──────────────────────────────────────────────
-FUNDING_LOOKBACK      = 3        # rata-rata N funding rate terakhir
-FUNDING_THRESHOLD     = 0.08     # threshold naik: 0.05% → 0.08%
-FUNDING_TREND_WEIGHT  = 1.5      # multiplier kalau funding trend memburuk (makin crowded)
-
-# ── FIX 4: Flash crash / pump detector ───────────────────────────────────────
-FLASH_CRASH_PCT       = 1.2      # % drop BTC dalam 5 menit → emergency exit LONG
-FLASH_PUMP_PCT        = 1.2      # % pump BTC dalam 5 menit → emergency exit SHORT
-FLASH_WINDOW_SEC      = 300      # window 5 menit
-_btc_price_history    = deque(maxlen=100)  # (timestamp, price) untuk flash detector
-
-# Smart Cooldown
-COOLDOWN_BTC_BAD      = {"BEAR", "MILD_BEAR"}
-COOLDOWN_BREADTH_MAX  = 0.40
-COOLDOWN_BTC_RECOVER  = {"BULL", "MILD_BULL"}
-COOLDOWN_BREADTH_MIN  = 0.50
-
-# Composite score weights (total = 100)
-SCORE_WEIGHTS = {
-    "macd_hist":    18,
-    "rsi":          15,
-    "ema_stack":    14,
-    "volume":       13,
-    "ob_imbalance": 12,
-    "cum_delta":    10,
-    "stoch":         8,
-    "bb":            6,
-    "funding":       4,
-}
+# ── Smart Cooldown ───────────────────────────────────────────────────────────
+COOLDOWN_BTC_BAD      = {"BEAR"}     # lebih toleran, MILD_BEAR masih boleh scalp
+COOLDOWN_BREADTH_MAX  = 0.35
+COOLDOWN_BTC_RECOVER  = {"BULL", "MILD_BULL", "SIDEWAYS"}
+COOLDOWN_BREADTH_MIN  = 0.45
 
 SYMBOLS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT",
@@ -121,17 +123,36 @@ SYMBOLS = [
     "1000PEPEUSDT","WIFUSDT","JUPUSDT",
 ]
 
+# ── Composite score weights (scalp-tuned) ────────────────────────────────────
+SCORE_WEIGHTS = {
+    "macd_hist":    16,
+    "rsi":          14,
+    "ema_stack":    12,
+    "volume":       12,
+    "ob_imbalance": 10,
+    "cum_delta":     8,
+    "stoch":         8,
+    "bb":            8,      # lebih penting di scalp (mean-reversion)
+    "funding":       4,
+    "momentum_5m":   8,      # BARU: sinyal 5m
+}
+
+# ════════════════════════════════════════════════════
+#  STATE
+# ════════════════════════════════════════════════════
 open_positions  = {}
 trade_log       = []
 _last_candle    = {}
 _consec_loss    = 0
 _in_cooldown    = False
+_scan_batch_idx = 0
+_ohlcv_cache    = {}
+_btc_price_history = deque(maxlen=100)
+_sym_info       = {}
 
 # ════════════════════════════════════════════════════
 #  UTILS
 # ════════════════════════════════════════════════════
-_sym_info = {}
-
 def get_sym_info(symbol):
     if symbol in _sym_info: return _sym_info[symbol]
     try:
@@ -153,7 +174,7 @@ def round_step(qty, step):
 
 def calc_qty(symbol, price, fraction=1.0):
     info = get_sym_info(symbol)
-    return max(round_step((ORDER_USDT * fraction) / price, info["step"]), info["minQty"])
+    return max(round_step((ORDER_USDT * fraction * LEVERAGE) / price / LEVERAGE, info["step"]), info["minQty"])
 
 def set_leverage(symbol):
     try: client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
@@ -186,32 +207,27 @@ def get_exchange_amt(symbol, retries=3):
                 return None
 
 # ════════════════════════════════════════════════════
-#  FIX 1: OHLCV dengan cache + batch scan
+#  OHLCV CACHE (multi-TF)
 # ════════════════════════════════════════════════════
 def get_ohlcv(symbol, interval, limit=200):
-    """
-    Fetch OHLCV dengan cache.
-    Kalau data untuk (symbol, interval) masih segar (< OHLCV_CACHE_TTL detik),
-    kembalikan cache tanpa API call baru.
-    Cache TTL = 55 detik untuk interval 15m (candle baru tiap 60 detik).
-    Untuk interval 1H/4H TTL bisa lebih panjang, tapi kita pakai TTL sama
-    karena fungsi ini juga dipanggil untuk macro (BTC trend).
-    """
     cache_key = (symbol, interval)
     now = time.time()
 
-    # Tentukan TTL berdasarkan interval
-    if interval in (Client.KLINE_INTERVAL_4HOUR,):
-        ttl = 3500   # 4H candle: cache hampir 1 jam
-    elif interval in (Client.KLINE_INTERVAL_1HOUR,):
-        ttl = 3500   # 1H candle: cache ~58 menit
+    if interval == Client.KLINE_INTERVAL_4HOUR:
+        ttl = 3500
+    elif interval == Client.KLINE_INTERVAL_1HOUR:
+        ttl = OHLCV_CACHE_TTL_1H
+    elif interval == Client.KLINE_INTERVAL_15MINUTE:
+        ttl = OHLCV_CACHE_TTL_15M
+    elif interval == Client.KLINE_INTERVAL_5MINUTE:
+        ttl = OHLCV_CACHE_TTL_5M
     else:
-        ttl = OHLCV_CACHE_TTL  # 15m candle: cache 55 detik
+        ttl = 55
 
     if cache_key in _ohlcv_cache:
         ts, df_cached = _ohlcv_cache[cache_key]
         if now - ts < ttl:
-            return df_cached  # pakai cache, tidak ada API call
+            return df_cached
 
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
@@ -222,85 +238,21 @@ def get_ohlcv(symbol, interval, limit=200):
             df[c] = df[c].astype(float)
         df["time"] = pd.to_numeric(df["time"])
         _ohlcv_cache[cache_key] = (now, df)
-        _ohlcv_errors.pop(cache_key, None)
         return df
-    except Exception as e:
-        err_msg = str(e)[:80]
-        _ohlcv_errors[cache_key] = err_msg
-
-        # Auto-backoff: kalau IP banned (-1003), tunggu 65 detik sebelum lanjut
-        # supaya tidak terus-terusan retry dan memperpanjang ban
-        if "-1003" in err_msg:
-            print(f"\n  🚫 IP RATE LIMITED — tunggu 65 detik otomatis...")
-            time.sleep(65)
-
+    except:
         if cache_key in _ohlcv_cache:
             _, df_old = _ohlcv_cache[cache_key]
             return df_old
         return None
 
 def get_current_batch(symbols):
-    """
-    FIX 1: Ambil subset simbol untuk di-scan di cycle ini (round-robin batch).
-    Contoh: 28 simbol, BATCH_SIZE=7 → 4 batch, tiap cycle scan 7 simbol berbeda.
-    Full scan selesai dalam 4 cycle (~4 menit).
-    Simbol yang sudah punya open position tetap di-check di manage_positions(),
-    jadi tidak ada risiko melewatkan exit signal.
-    """
     global _scan_batch_idx
-    if not symbols:
-        return []
+    if not symbols: return []
     total_batches = math.ceil(len(symbols) / BATCH_SIZE)
     start = _scan_batch_idx * BATCH_SIZE
-    end   = start + BATCH_SIZE
-    batch = symbols[start:end]
+    batch = symbols[start:start + BATCH_SIZE]
     _scan_batch_idx = (_scan_batch_idx + 1) % total_batches
     return batch
-
-# ════════════════════════════════════════════════════
-#  SUPPORT & RESISTANCE (4H Swing Points)
-# ════════════════════════════════════════════════════
-def get_sr_levels(symbol, lookback=30):
-    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_4HOUR, lookback + 5)
-    if df is None or len(df) < 10:
-        return {"resistance": [], "support": []}
-
-    highs = df["high"].values
-    lows  = df["low"].values
-    resistance = []
-    support    = []
-
-    for i in range(2, len(highs) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            resistance.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            support.append(lows[i])
-
-    return {"resistance": sorted(resistance, reverse=True)[:5],
-            "support":    sorted(support)[:5]}
-
-def check_sr_clear(symbol, price, direction):
-    sr = get_sr_levels(symbol)
-
-    if direction == "LONG":
-        nearby_res = [r for r in sr["resistance"] if r > price]
-        if nearby_res:
-            nearest = min(nearby_res)
-            gap_pct  = (nearest - price) / price
-            if gap_pct < SR_BUFFER:
-                return False, f"Terlalu dekat resistance {nearest:.4f} (gap {gap_pct*100:.2f}%)"
-
-    elif direction == "SHORT":
-        nearby_sup = [s for s in sr["support"] if s < price]
-        if nearby_sup:
-            nearest = max(nearby_sup)
-            gap_pct  = (price - nearest) / price
-            if gap_pct < SR_BUFFER:
-                return False, f"Terlalu dekat support {nearest:.4f} (gap {gap_pct*100:.2f}%)"
-
-    return True, ""
 
 # ════════════════════════════════════════════════════
 #  MACRO CACHE
@@ -314,13 +266,16 @@ _macro = {
     "btc_trend_4h":  "UNKNOWN",
     "market_breadth": 0.5,
     "global_mcap_chg": 0.0,
+    "scalp_mode": "TREND",        # BARU: "TREND" atau "MEAN_REV"
     "last_fng": 0, "last_dom": 0, "last_news": 0,
-    "last_btc": 0, "last_breadth": 0, "last_mcap": 0
+    "last_btc": 0, "last_breadth": 0,
 }
 
-def _calc_btc_trend(df):
-    if df is None or len(df) < 30:
-        return "UNKNOWN"
+BULL_TRENDS = {"BULL", "MILD_BULL"}
+BEAR_TRENDS = {"BEAR", "MILD_BEAR"}
+
+def _calc_trend(df):
+    if df is None or len(df) < 30: return "UNKNOWN"
     c     = df["close"]
     price = c.iloc[-1]
     ema9  = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
@@ -328,15 +283,23 @@ def _calc_btc_trend(df):
     ema50 = ta.trend.EMAIndicator(c, 50).ema_indicator().iloc[-1]
     chg   = (price - c.iloc[-4]) / c.iloc[-4] * 100
 
-    if price > ema9 > ema21 > ema50 and chg > 0:
-        return "BULL"
-    elif price < ema9 < ema21 < ema50 and chg < 0:
-        return "BEAR"
-    elif price > ema21 and chg > -0.3:
-        return "MILD_BULL"
-    elif price < ema21 and chg < 0.3:
-        return "MILD_BEAR"
+    if price > ema9 > ema21 > ema50 and chg > 0:   return "BULL"
+    elif price < ema9 < ema21 < ema50 and chg < 0: return "BEAR"
+    elif price > ema21 and chg > -0.3:             return "MILD_BULL"
+    elif price < ema21 and chg < 0.3:              return "MILD_BEAR"
     return "SIDEWAYS"
+
+def _detect_scalp_mode():
+    """
+    Pilih mode scalping berdasarkan kondisi market:
+    - TREND: BTC trending → cari momentum continuation (pullback to EMA)
+    - MEAN_REV: BTC sideways/ranging → cari BB bounce + RSI extreme
+    """
+    t15 = _macro["btc_trend_15m"]
+    t1h = _macro["btc_trend_1h"]
+    if t1h in ("BULL", "BEAR") or t15 in ("BULL", "BEAR"):
+        return "TREND"
+    return "MEAN_REV"
 
 def refresh_macro():
     now = time.time()
@@ -354,8 +317,7 @@ def refresh_macro():
             d = requests.get("https://api.coingecko.com/api/v3/global", timeout=8).json()
             _macro["usdt_prev"] = _macro["usdt_d"]
             _macro["usdt_d"]    = round(d["data"]["market_cap_percentage"].get("usdt", 5), 2)
-            chg_pct = d["data"].get("market_cap_change_percentage_24h_usd", 0)
-            _macro["global_mcap_chg"] = round(chg_pct, 2)
+            _macro["global_mcap_chg"] = round(d["data"].get("market_cap_change_percentage_24h_usd", 0), 2)
             _macro["last_dom"]  = now
         except: pass
 
@@ -377,54 +339,35 @@ def refresh_macro():
                 elif any(w in tl for w in neg_kw_mild): neg += 1; hl.append(f"🔴 {t[:55]}")
                 elif any(w in tl for w in pos_kw_strong): pos += 2; hl.append(f"🟢🟢 {t[:55]}")
                 elif any(w in tl for w in pos_kw_mild):   pos += 1; hl.append(f"🟢 {t[:55]}")
-
             score = pos - neg
             if score <= -4:   sentiment = "strong_negative"
             elif score <= -2: sentiment = "negative"
             elif score >= 4:  sentiment = "strong_positive"
             elif score >= 2:  sentiment = "positive"
             else:             sentiment = "neutral"
-
             _macro["news"]          = sentiment
             _macro["news_strength"] = score
             _macro["headlines"]     = hl[:3]
             _macro["last_news"]     = now
         except: pass
 
-    # BTC 15m: refresh tiap 60 detik (paling sering berubah)
-    if now - _macro["last_btc"] > 60:
+    if now - _macro["last_btc"] > 30:   # refresh lebih sering untuk scalp
         try:
             df_15m = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_15MINUTE, 60)
-            _macro["btc_trend_15m"] = _calc_btc_trend(df_15m)
+            df_1h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
+            df_4h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_4HOUR, 60)
+            _macro["btc_trend_15m"] = _calc_trend(df_15m)
+            _macro["btc_trend_1h"]  = _calc_trend(df_1h)
+            _macro["btc_trend_4h"]  = _calc_trend(df_4h)
+            _macro["scalp_mode"]    = _detect_scalp_mode()
             _macro["last_btc"]      = now
         except: pass
 
-    # BTC 1H: refresh tiap 10 menit (tidak perlu tiap cycle)
-    if now - _macro.get("last_btc_1h", 0) > 600:
-        try:
-            time.sleep(0.15)
-            df_1h = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
-            _macro["btc_trend_1h"]  = _calc_btc_trend(df_1h)
-            _macro["last_btc_1h"]   = now
-        except: pass
-
-    # BTC 4H: refresh tiap 20 menit (paling jarang berubah)
-    if now - _macro.get("last_btc_4h", 0) > 1200:
-        try:
-            time.sleep(0.15)
-            df_4h = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_4HOUR, 60)
-            _macro["btc_trend_4h"]  = _calc_btc_trend(df_4h)
-            _macro["last_btc_4h"]   = now
-        except: pass
-
-    if now - _macro["last_breadth"] > 300:
+    if now - _macro["last_breadth"] > 120:  # refresh lebih sering
         try:
             bullish = 0
-            # Kurangi sample dari 15 → 8 simbol untuk hemat API call
-            # Cukup representatif untuk breadth, tidak perlu 15 sekaligus
-            sample  = SYMBOLS[:8]
+            sample  = SYMBOLS[:15]
             for sym in sample:
-                time.sleep(0.15)   # throttle 150ms antar call supaya tidak burst
                 df = get_ohlcv(sym, Client.KLINE_INTERVAL_15MINUTE, 10)
                 if df is not None and len(df) >= 5:
                     c    = df["close"]
@@ -436,126 +379,33 @@ def refresh_macro():
         except: pass
 
 # ════════════════════════════════════════════════════
-#  FIX 4: Flash Crash / Pump Detector
+#  FLASH CRASH DETECTOR
 # ════════════════════════════════════════════════════
 def update_btc_price_history():
-    """
-    Rekam harga BTC saat ini ke history ring buffer.
-    Dipanggil setiap cycle (tiap 60 detik).
-    """
     try:
         price = get_price("BTCUSDT")
         if price > 0:
             _btc_price_history.append((time.time(), price))
-    except:
-        pass
+    except: pass
 
 def detect_flash_move():
-    """
-    FIX 4: Deteksi pergerakan BTC ekstrem dalam FLASH_WINDOW_SEC terakhir
-    tanpa perlu tunggu candle 1H/4H closed.
-
-    Returns:
-        ("crash", pct)  → harga turun tajam → emergency exit LONG
-        ("pump",  pct)  → harga naik tajam  → emergency exit SHORT
-        ("none",  0.0)  → normal
-    """
-    if len(_btc_price_history) < 2:
-        return "none", 0.0
-
-    now = time.time()
+    if len(_btc_price_history) < 2: return "none", 0.0
+    now    = time.time()
     cutoff = now - FLASH_WINDOW_SEC
-
-    # Ambil price tertua dalam window
     oldest_price = None
     for ts, px in _btc_price_history:
         if ts >= cutoff:
             oldest_price = px
             break
-
-    if oldest_price is None:
-        return "none", 0.0
-
+    if oldest_price is None: return "none", 0.0
     current_price = _btc_price_history[-1][1]
     pct_change = (current_price - oldest_price) / oldest_price * 100
-
-    if pct_change <= -FLASH_CRASH_PCT:
-        return "crash", abs(pct_change)
-    if pct_change >= FLASH_PUMP_PCT:
-        return "pump", abs(pct_change)
+    if pct_change <= -FLASH_CRASH_PCT: return "crash", abs(pct_change)
+    if pct_change >= FLASH_PUMP_PCT:   return "pump",  abs(pct_change)
     return "none", 0.0
 
 # ════════════════════════════════════════════════════
-#  HELPER: BTC trend gabungan
-# ════════════════════════════════════════════════════
-BULL_TRENDS = {"BULL", "MILD_BULL"}
-BEAR_TRENDS = {"BEAR", "MILD_BEAR"}
-
-def btc_multi_tf_ok_for(direction):
-    t15 = _macro["btc_trend_15m"]
-    t1h = _macro["btc_trend_1h"]
-    t4h = _macro["btc_trend_4h"]
-
-    if direction == "LONG":
-        if t4h in BEAR_TRENDS:
-            return False, f"BTC 4H={t4h} bearish — skip LONG"
-        if t1h in BEAR_TRENDS:
-            return False, f"BTC 1H={t1h} bearish — skip LONG"
-        if t1h == "SIDEWAYS" and t15 in BEAR_TRENDS:
-            return False, f"BTC 1H=SIDEWAYS + 15m={t15} — skip LONG"
-    elif direction == "SHORT":
-        if t4h in BULL_TRENDS:
-            return False, f"BTC 4H={t4h} bullish — skip SHORT"
-        if t1h in BULL_TRENDS:
-            return False, f"BTC 1H={t1h} bullish — skip SHORT"
-        if t1h == "SIDEWAYS" and t15 in BULL_TRENDS:
-            return False, f"BTC 1H=SIDEWAYS + 15m={t15} — skip SHORT"
-
-    return True, ""
-
-# ════════════════════════════════════════════════════
-#  SMART COOLDOWN
-# ════════════════════════════════════════════════════
-def check_cooldown_recover():
-    btc_ok     = _macro["btc_trend_15m"] in COOLDOWN_BTC_RECOVER
-    breadth_ok = _macro["market_breadth"] >= COOLDOWN_BREADTH_MIN
-    return btc_ok and breadth_ok
-
-def is_cooldown_active():
-    global _in_cooldown
-    if not _in_cooldown:
-        return False
-    if check_cooldown_recover():
-        _in_cooldown = False
-        print(f"  ✅ Cooldown dibatalkan! BTC:{_macro['btc_trend_15m']} "
-              f"Breadth:{_macro['market_breadth']*100:.0f}%")
-        return False
-    return True
-
-def cooldown_reason():
-    reasons = []
-    if _macro["btc_trend_15m"] in COOLDOWN_BTC_BAD:
-        reasons.append(f"BTC {_macro['btc_trend_15m']}")
-    if _macro["market_breadth"] < COOLDOWN_BREADTH_MIN:
-        reasons.append(f"breadth {_macro['market_breadth']*100:.0f}%")
-    return " & ".join(reasons) if reasons else "kondisi belum jelas"
-
-# ════════════════════════════════════════════════════
-#  REGIME (1H per symbol)
-# ════════════════════════════════════════════════════
-def get_regime(symbol):
-    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 60)
-    if df is None or len(df) < 55: return "RANGE"
-    c     = df["close"]
-    price = c.iloc[-1]
-    ema20 = ta.trend.EMAIndicator(c, 20).ema_indicator().iloc[-1]
-    ema50 = ta.trend.EMAIndicator(c, 50).ema_indicator().iloc[-1]
-    if ema20 > ema50 and price > ema50: return "BULL"
-    if ema20 < ema50 and price < ema50: return "BEAR"
-    return "RANGE"
-
-# ════════════════════════════════════════════════════
-#  TECHNICAL ANALYSIS (15m)
+#  TECHNICAL ANALYSIS
 # ════════════════════════════════════════════════════
 def run_ta(df):
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
@@ -587,235 +437,272 @@ def run_ta(df):
     return df
 
 # ════════════════════════════════════════════════════
-#  FIX 3: Funding Rate (average + trend)
+#  1H BIAS — Filter utama (gatekeeper)
+# ════════════════════════════════════════════════════
+def get_1h_bias(symbol):
+    """
+    Analisis 1H candle untuk tentukan BIAS keseluruhan.
+    Returns: ("LONG", confidence) / ("SHORT", confidence) / ("NONE", 0)
+
+    Confidence 0-100 menunjukkan seberapa kuat biasnya.
+    Digunakan untuk:
+    1. Filter direction: kalau bias LONG, hanya buka LONG
+    2. Boosting score: bias kuat → lebih mudah lewat threshold
+    """
+    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 60)
+    if df is None or len(df) < 55:
+        return "NONE", 0
+
+    df = run_ta(df.copy())
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    score_long  = 0
+    score_short = 0
+    max_pts     = 0
+
+    # EMA Stack (paling penting di 1H)
+    e9, e21, e50 = last["ema9"], last["ema21"], last["ema50"]
+    if e9 > e21 > e50:
+        score_long += 35
+    elif e9 < e21 < e50:
+        score_short += 35
+    elif e9 > e21:
+        score_long += 15
+    elif e9 < e21:
+        score_short += 15
+    max_pts += 35
+
+    # Price vs EMA200 (trend besar)
+    ema200 = last["ema200"]
+    if last["close"] > ema200:
+        score_long += 20
+    else:
+        score_short += 20
+    max_pts += 20
+
+    # MACD momentum
+    if last["macd_hist"] > 0 and last["macd_hist"] > prev["macd_hist"]:
+        score_long += 25
+    elif last["macd_hist"] < 0 and last["macd_hist"] < prev["macd_hist"]:
+        score_short += 25
+    max_pts += 25
+
+    # RSI zone
+    rsi = last["rsi"]
+    if rsi > 50 and rsi < 70:
+        score_long += 10
+    elif rsi < 50 and rsi > 30:
+        score_short += 10
+    elif rsi >= 70:
+        score_short += 5  # overbought → slight bias short
+    elif rsi <= 30:
+        score_long += 5   # oversold → slight bias long
+    max_pts += 10
+
+    # Stoch
+    if last["stk"] > last["std"] and last["stk"] < 80:
+        score_long += 10
+    elif last["stk"] < last["std"] and last["stk"] > 20:
+        score_short += 10
+    max_pts += 10
+
+    long_pct  = (score_long  / max_pts * 100)
+    short_pct = (score_short / max_pts * 100)
+
+    if long_pct >= 55 and long_pct > short_pct + 10:
+        return "LONG", long_pct
+    if short_pct >= 55 and short_pct > long_pct + 10:
+        return "SHORT", short_pct
+    return "NONE", max(long_pct, short_pct)
+
+# ════════════════════════════════════════════════════
+#  5m ENTRY TRIGGER — Precision entry
+# ════════════════════════════════════════════════════
+def get_5m_entry_signals(symbol, direction):
+    """
+    Analisis 5m candle untuk timing entry presisi.
+
+    Sinyal yang dicari (setiap sinyal valid = +1 count):
+    1. Engulfing candle searah
+    2. RSI bounce (oversold untuk LONG, overbought untuk SHORT)
+    3. EMA9 cross di 5m
+    4. Volume spike di 5m
+    5. Breakout dari mini range (high/low 10 candle terakhir)
+
+    Returns: (count, detail_list)
+    Butuh ≥ MIN_5M_SIGNALS untuk entry.
+    """
+    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_5MINUTE, 50)
+    if df is None or len(df) < 20:
+        return 0, ["Data 5m tidak cukup"]
+
+    df = run_ta(df.copy())
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    signals = []
+
+    # Sinyal 1: Bullish/Bearish Engulfing
+    if direction == "LONG":
+        if (last["close"] > last["open"] and         # candle hijau
+            last["close"] > prev["high"] and         # close di atas high sebelumnya
+            last["body_ratio"] > 0.6):               # body dominan
+            signals.append("🕯️ Engulfing LONG")
+    else:
+        if (last["close"] < last["open"] and
+            last["close"] < prev["low"] and
+            last["body_ratio"] > 0.6):
+            signals.append("🕯️ Engulfing SHORT")
+
+    # Sinyal 2: RSI Bounce
+    rsi = last["rsi"]
+    rsi_fast = last["rsi_fast"]
+    if direction == "LONG" and rsi < 40 and rsi_fast > df.iloc[-2]["rsi_fast"]:
+        signals.append(f"📈 RSI bounce ({rsi:.0f})")
+    elif direction == "SHORT" and rsi > 60 and rsi_fast < df.iloc[-2]["rsi_fast"]:
+        signals.append(f"📉 RSI pullback ({rsi:.0f})")
+
+    # Sinyal 3: EMA9 Cross di 5m
+    ema9_now  = last["ema9"]
+    ema9_prev = prev["ema9"]
+    ema21_now  = last["ema21"]
+    ema21_prev = prev["ema21"]
+    if direction == "LONG":
+        if (last["close"] > ema9_now and prev["close"] <= ema9_prev) or \
+           (ema9_now > ema21_now and ema9_prev <= ema21_prev):
+            signals.append("➡️ EMA9 cross LONG")
+    else:
+        if (last["close"] < ema9_now and prev["close"] >= ema9_prev) or \
+           (ema9_now < ema21_now and ema9_prev >= ema21_prev):
+            signals.append("➡️ EMA9 cross SHORT")
+
+    # Sinyal 4: Volume Spike di 5m
+    if last["vol_ratio"] >= 1.5:
+        if direction == "LONG" and last["buy_ratio"] > 0.55 and last["close"] > last["open"]:
+            signals.append(f"📊 Vol spike 5m ({last['vol_ratio']:.1f}x)")
+        elif direction == "SHORT" and last["buy_ratio"] < 0.45 and last["close"] < last["open"]:
+            signals.append(f"📊 Vol spike 5m ({last['vol_ratio']:.1f}x)")
+
+    # Sinyal 5: Mini Breakout (dari range 10 candle terakhir)
+    recent_10 = df.iloc[-11:-1]
+    mini_high = recent_10["high"].max()
+    mini_low  = recent_10["low"].min()
+    if direction == "LONG" and last["close"] > mini_high:
+        signals.append(f"🚀 Breakout mini range ({mini_high:.4f})")
+    elif direction == "SHORT" and last["close"] < mini_low:
+        signals.append(f"💥 Breakdown mini range ({mini_low:.4f})")
+
+    # Sinyal 6 (BONUS): Stochastic golden/death cross di 5m
+    if direction == "LONG" and last["stk"] > last["std"] and prev["stk"] <= prev["std"] and last["stk"] < 80:
+        signals.append(f"⚡ Stoch GX 5m ({last['stk']:.0f})")
+    elif direction == "SHORT" and last["stk"] < last["std"] and prev["stk"] >= prev["std"] and last["stk"] > 20:
+        signals.append(f"⚡ Stoch DX 5m ({last['stk']:.0f})")
+
+    return len(signals), signals
+
+# ════════════════════════════════════════════════════
+#  MEAN REVERSION MODE (untuk market sideways)
+# ════════════════════════════════════════════════════
+def check_mean_reversion_setup(df_15m, symbol):
+    """
+    Mode khusus untuk market sideways/ranging.
+    Cari: harga di BB lower → LONG | harga di BB upper → SHORT
+    Konfirmasi RSI extreme + volume spike.
+
+    Returns: (direction, score) atau (None, 0)
+    """
+    if df_15m is None or len(df_15m) < 30:
+        return None, 0
+
+    last = df_15m.iloc[-1]
+    prev = df_15m.iloc[-2]
+
+    bb_lo = last["bb_lo"]
+    bb_hi = last["bb_hi"]
+    bb_mid = last["bb_mid"]
+    price  = last["close"]
+    rsi    = last["rsi"]
+
+    # Setup LONG: harga di bawah/di BB lower, RSI oversold, volume naik
+    if price <= bb_lo * 1.003 and rsi < 38:
+        score = 60
+        if last["vol_ratio"] > 1.2: score += 10
+        if last["stk"] < 25 and last["stk"] > last["std"]: score += 10
+        if last["close"] > last["open"]: score += 10  # candle reversal
+        if prev["close"] < prev["open"] and last["close"] > last["open"]: score += 10  # reversal candle
+        return "LONG", min(score, 100)
+
+    # Setup SHORT: harga di atas/di BB upper, RSI overbought, volume naik
+    if price >= bb_hi * 0.997 and rsi > 62:
+        score = 60
+        if last["vol_ratio"] > 1.2: score += 10
+        if last["stk"] > 75 and last["stk"] < last["std"]: score += 10
+        if last["close"] < last["open"]: score += 10  # candle reversal
+        if prev["close"] > prev["open"] and last["close"] < last["open"]: score += 10
+        return "SHORT", min(score, 100)
+
+    return None, 0
+
+# ════════════════════════════════════════════════════
+#  TREND MODE (untuk market trending)
+# ════════════════════════════════════════════════════
+def check_trend_pullback_setup(df_15m, bias_direction):
+    """
+    Mode untuk market trending.
+    Cari: pullback ke EMA9/EMA21 searah bias.
+    Entry setelah candle reversal + volume konfirmasi.
+
+    Returns: (direction, score) atau (None, 0)
+    """
+    if df_15m is None or len(df_15m) < 30:
+        return None, 0
+
+    last = df_15m.iloc[-1]
+    prev = df_15m.iloc[-2]
+    price = last["close"]
+    e9    = last["ema9"]
+    e21   = last["ema21"]
+
+    if bias_direction == "LONG":
+        # Pullback ke EMA9 atau EMA21 → entry LONG
+        touch_ema9  = abs(price - e9)  / price < 0.003
+        touch_ema21 = abs(price - e21) / price < 0.003
+        if (touch_ema9 or touch_ema21) and price > e21:
+            score = 60
+            if last["rsi"] < 55:           score += 10
+            if last["vol_ratio"] > 1.1:    score += 10
+            if last["close"] > last["open"]: score += 10  # bounce confirmed
+            if e9 > e21:                   score += 10   # EMA masih bullish
+            return "LONG", min(score, 100)
+
+    elif bias_direction == "SHORT":
+        # Pullback ke EMA9 atau EMA21 → entry SHORT
+        touch_ema9  = abs(price - e9)  / price < 0.003
+        touch_ema21 = abs(price - e21) / price < 0.003
+        if (touch_ema9 or touch_ema21) and price < e21:
+            score = 60
+            if last["rsi"] > 45:           score += 10
+            if last["vol_ratio"] > 1.1:    score += 10
+            if last["close"] < last["open"]: score += 10  # rejection confirmed
+            if e9 < e21:                   score += 10   # EMA masih bearish
+            return "SHORT", min(score, 100)
+
+    return None, 0
+
+# ════════════════════════════════════════════════════
+#  15m SETUP SCORE (adapted untuk scalp)
 # ════════════════════════════════════════════════════
 def get_funding(symbol):
-    """
-    FIX 3: Ambil FUNDING_LOOKBACK data terakhir, hitung:
-    - avg_funding: rata-rata funding rate
-    - funding_trend: apakah funding makin naik/turun (crowding detector)
-
-    Kalau trend funding memburuk (makin positif untuk LONG, makin negatif untuk SHORT),
-    naikkan bobot penalti lewat FUNDING_TREND_WEIGHT.
-
-    Returns: (avg_funding: float, funding_trend: str)
-    """
     try:
         data = client.futures_funding_rate(symbol=symbol, limit=FUNDING_LOOKBACK + 1)
-        if not data:
-            return 0.0, "flat"
-
+        if not data: return 0.0, "flat"
         rates = [round(float(d["fundingRate"]) * 100, 4) for d in data]
-
-        # Rata-rata N terakhir (bukan hanya 1)
-        avg = round(sum(rates[:FUNDING_LOOKBACK]) / min(len(rates), FUNDING_LOOKBACK), 4)
-
-        # Trend: bandingkan rate terbaru vs rate terlama dalam window
-        if len(rates) >= 2:
-            delta = rates[0] - rates[-1]  # rates[0] = paling baru
-            if delta > 0.01:
-                trend = "rising"    # makin crowded LONG
-            elif delta < -0.01:
-                trend = "falling"   # makin crowded SHORT
-            else:
-                trend = "flat"
-        else:
-            trend = "flat"
-
+        avg   = round(sum(rates[:FUNDING_LOOKBACK]) / min(len(rates), FUNDING_LOOKBACK), 4)
+        trend = "rising" if len(rates) >= 2 and rates[0] - rates[-1] > 0.01 else \
+                "falling" if len(rates) >= 2 and rates[0] - rates[-1] < -0.01 else "flat"
         return avg, trend
     except:
         return 0.0, "flat"
-
-# ════════════════════════════════════════════════════
-#  FIX 2: Adaptive Volume Spike
-# ════════════════════════════════════════════════════
-def calc_adaptive_vol_threshold(df):
-    """
-    FIX 2: Hitung threshold volume spike yang adaptif berdasarkan ATR% simbol.
-
-    Logika:
-    - Simbol volatile (ATR% tinggi) = noise lebih besar = butuh spike lebih besar
-    - Formula: threshold = BASE_VOL_SPIKE + (atr_pct / ATR_VOL_SCALE)
-    - ATR% = ATR / price * 100 (dalam %)
-
-    Contoh:
-    - BTCUSDT: ATR 0.4% → threshold = 1.5 + 0.4/1.2 = 1.83x (hampir sama dengan v9)
-    - DOGEUSDT: ATR 3.5% → threshold = 1.5 + 3.5/1.2 = 4.42x (jauh lebih ketat)
-    - ETHUSDT: ATR 1.2% → threshold = 1.5 + 1.2/1.2 = 2.50x (menengah)
-    """
-    try:
-        last = df.iloc[-1]
-        atr_pct = (last["atr"] / last["close"]) * 100
-        threshold = BASE_VOL_SPIKE + (atr_pct / ATR_VOL_SCALE)
-        # Cap threshold antara 1.5x dan 5x agar tidak ekstrem
-        return round(max(BASE_VOL_SPIKE, min(threshold, 5.0)), 2)
-    except:
-        return BASE_VOL_SPIKE
-
-def check_volume_spike_confirm(df, direction):
-    """
-    FIX 2: Volume spike harus ada di ≥ VOL_SPIKE_MIN_CANDLES dari 3 candle terakhir.
-    Threshold spike sekarang adaptif (tidak flat 1.5x untuk semua simbol).
-
-    Lebih ketat dari v9 yang:
-    - Threshold flat 1.5x untuk semua simbol
-    - Cukup 1 dari 3 candle
-    """
-    min_spike = calc_adaptive_vol_threshold(df)
-    recent    = df.iloc[-3:]
-    count     = 0
-    best_info = ""
-
-    for _, row in recent.iterrows():
-        vr = row["vol_ratio"]
-        br = row["buy_ratio"]
-        if vr >= min_spike:
-            if direction == "LONG" and row["close"] > row["open"] and br > 0.52:
-                count += 1
-                best_info = f"vol {vr:.1f}x buy {br:.2f}"
-            elif direction == "SHORT" and row["close"] < row["open"] and br < 0.48:
-                count += 1
-                best_info = f"vol {vr:.1f}x sell {1-br:.2f}"
-
-    if count >= VOL_SPIKE_MIN_CANDLES:
-        return True, f"{best_info} (threshold:{min_spike:.1f}x, {count}/3 candles)"
-    return False, f"spike kurang ({count}/{VOL_SPIKE_MIN_CANDLES} candles, threshold:{min_spike:.1f}x)"
-
-def calc_composite_score(df, regime, ob_imb, cum_d, funding_avg, funding_trend):
-    """
-    FIX 3: Terima funding_avg + funding_trend (bukan satu angka).
-    Kalau funding trend memburuk (rising untuk long crowding),
-    penalti dikalikan FUNDING_TREND_WEIGHT.
-    """
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    W    = SCORE_WEIGHTS
-    breakdown = {}
-    long_score = short_score = 0.0
-
-    # 1. MACD Histogram momentum
-    hist_now  = last["macd_hist"]
-    hist_prev = prev["macd_hist"]
-    if hist_now > 0 and hist_now > hist_prev:
-        pts = W["macd_hist"] if (last["macd"] > last["macd_sig"] and prev["macd"] <= prev["macd_sig"]) \
-              else W["macd_hist"] * 0.7
-        long_score += pts
-        breakdown["macd"] = f"+{pts:.1f}L"
-    elif hist_now < 0 and hist_now < hist_prev:
-        pts = W["macd_hist"] if (last["macd"] < last["macd_sig"] and prev["macd"] >= prev["macd_sig"]) \
-              else W["macd_hist"] * 0.7
-        short_score += pts
-        breakdown["macd"] = f"+{pts:.1f}S"
-    else:
-        breakdown["macd"] = "0"
-
-    # 2. RSI
-    rsi = last["rsi"]
-    if rsi < 35:
-        pts = W["rsi"] if rsi < 30 else W["rsi"] * 0.6
-        long_score += pts; breakdown["rsi"] = f"+{pts:.1f}L"
-    elif rsi > 65:
-        pts = W["rsi"] if rsi > 70 else W["rsi"] * 0.6
-        short_score += pts; breakdown["rsi"] = f"+{pts:.1f}S"
-    else:
-        breakdown["rsi"] = "0"
-
-    # 3. EMA Stack
-    e9, e21, e50 = last["ema9"], last["ema21"], last["ema50"]
-    if e9 > e21 > e50:
-        long_score += W["ema_stack"]; breakdown["ema"] = f"+{W['ema_stack']}L"
-    elif e9 < e21 < e50:
-        short_score += W["ema_stack"]; breakdown["ema"] = f"+{W['ema_stack']}S"
-    else:
-        if e9 > e21: long_score += W["ema_stack"] * 0.4
-        elif e9 < e21: short_score += W["ema_stack"] * 0.4
-        breakdown["ema"] = "partial"
-
-    # 4. Volume + taker ratio (threshold sudah di-handle di check_volume_spike_confirm)
-    vr = last["vol_ratio"]
-    br = last["buy_ratio"]
-    if vr >= BASE_VOL_SPIKE:
-        if last["close"] > last["open"] and br > 0.55:
-            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
-            long_score += pts; breakdown["vol"] = f"+{pts:.1f}L({vr:.1f}x)"
-        elif last["close"] < last["open"] and br < 0.45:
-            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
-            short_score += pts; breakdown["vol"] = f"+{pts:.1f}S({vr:.1f}x)"
-        else:
-            breakdown["vol"] = f"spike({vr:.1f}x) tapi arah ambigu"
-    else:
-        breakdown["vol"] = f"no spike({vr:.1f}x)"
-
-    # 5. Order Book Imbalance
-    if ob_imb > 0.15:
-        pts = W["ob_imbalance"] * min(ob_imb / 0.15, 1.5)
-        long_score += pts; breakdown["ob"] = f"+{pts:.1f}L({ob_imb:+.2f})"
-    elif ob_imb < -0.15:
-        pts = W["ob_imbalance"] * min(abs(ob_imb) / 0.15, 1.5)
-        short_score += pts; breakdown["ob"] = f"+{pts:.1f}S({ob_imb:+.2f})"
-    else:
-        breakdown["ob"] = f"neutral({ob_imb:+.2f})"
-
-    # 6. Cumulative Delta
-    if cum_d > 0.15:
-        long_score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}L"
-    elif cum_d < -0.15:
-        short_score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}S"
-    else:
-        breakdown["delta"] = "0"
-
-    # 7. Stochastic
-    k, d   = last["stk"], last["std"]
-    pk, pd_ = prev["stk"], prev["std"]
-    if k < 25 and k > d and pk <= pd_:
-        long_score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}L"
-    elif k > 75 and k < d and pk >= pd_:
-        short_score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}S"
-    else:
-        breakdown["stoch"] = "0"
-
-    # 8. Bollinger Band
-    price = last["close"]
-    if price <= last["bb_lo"] * 1.002:
-        long_score += W["bb"]; breakdown["bb"] = f"+{W['bb']}L"
-    elif price >= last["bb_hi"] * 0.998:
-        short_score += W["bb"]; breakdown["bb"] = f"+{W['bb']}S"
-    else:
-        breakdown["bb"] = "0"
-
-    # 9. Funding Rate — FIX 3: pakai avg + trend
-    funding = funding_avg
-    trend_mult = FUNDING_TREND_WEIGHT if funding_trend == "rising" else 1.0
-    trend_mult_short = FUNDING_TREND_WEIGHT if funding_trend == "falling" else 1.0
-
-    if funding < -FUNDING_THRESHOLD:
-        pts = W["funding"] * trend_mult_short  # funding negatif + falling = crowded short → squeeze LONG
-        long_score += pts
-        breakdown["funding"] = f"+{pts:.1f}L(avg:{funding:.3f}% {funding_trend})"
-    elif funding > FUNDING_THRESHOLD:
-        pts = W["funding"] * trend_mult  # funding positif + rising = crowded long → squeeze SHORT
-        short_score += pts
-        breakdown["funding"] = f"+{pts:.1f}S(avg:{funding:.3f}% {funding_trend})"
-    else:
-        breakdown["funding"] = f"neutral(avg:{funding:.3f}% {funding_trend})"
-
-    # Regime adjustment
-    if regime == "BULL":
-        long_score  *= 1.1
-        short_score *= 0.8
-    elif regime == "BEAR":
-        short_score *= 1.1
-        long_score  *= 0.8
-
-    max_possible = sum(W.values()) * 1.5
-    long_pct  = min(long_score  / max_possible * 100, 100)
-    short_pct = min(short_score / max_possible * 100, 100)
-
-    if long_pct >= MIN_COMPOSITE_SCORE and long_pct > short_pct + 10:
-        return "LONG", long_pct, breakdown
-    if short_pct >= MIN_COMPOSITE_SCORE and short_pct > long_pct + 10:
-        return "SHORT", short_pct, breakdown
-    return "NONE", max(long_pct, short_pct), breakdown
 
 def get_ob_imbalance(symbol):
     try:
@@ -833,173 +720,332 @@ def get_cum_delta(df, lookback=10):
     norm = recent["delta"].sum() / (recent["volume"].sum() + 1)
     return round(norm, 3)
 
-def detect_whale(df):
-    last   = df.iloc[-1]
-    vol_ma = df["vol_ma"].iloc[-1]
-    if pd.isna(vol_ma) or vol_ma == 0: return "none", 1.0
-    ratio = last["volume"] / vol_ma
-    if ratio >= 3.5:
-        return ("buy_whale" if last["close"] > last["open"] else "sell_whale"), ratio
-    elif ratio >= 2.0:
-        return ("mild_buy" if last["close"] > last["open"] else "mild_sell"), ratio
-    return "none", ratio
+def calc_15m_score(df, direction, ob_imb, cum_d, funding_avg, funding_trend,
+                   mode_score=0, signal_5m_count=0):
+    """
+    Hitung composite score 15m untuk scalping.
+    Tambahan dibanding v9:
+    - mode_score: bonus dari trend/mean-rev setup
+    - signal_5m_count: bonus kalau 5m confirm kuat
+    """
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    W    = SCORE_WEIGHTS
+    breakdown = {}
+    score = 0.0
+
+    # 1. MACD Histogram
+    hist_now  = last["macd_hist"]
+    hist_prev = prev["macd_hist"]
+    if direction == "LONG":
+        if hist_now > 0 and hist_now > hist_prev:
+            pts = W["macd_hist"] if (last["macd"] > last["macd_sig"]) else W["macd_hist"] * 0.7
+            score += pts; breakdown["macd"] = f"+{pts:.1f}"
+        else: breakdown["macd"] = "0"
+    else:
+        if hist_now < 0 and hist_now < hist_prev:
+            pts = W["macd_hist"] if (last["macd"] < last["macd_sig"]) else W["macd_hist"] * 0.7
+            score += pts; breakdown["macd"] = f"+{pts:.1f}"
+        else: breakdown["macd"] = "0"
+
+    # 2. RSI
+    rsi = last["rsi"]
+    if direction == "LONG":
+        if rsi < 40:   pts = W["rsi"]
+        elif rsi < 50: pts = W["rsi"] * 0.5
+        else:          pts = 0
+    else:
+        if rsi > 60:   pts = W["rsi"]
+        elif rsi > 50: pts = W["rsi"] * 0.5
+        else:          pts = 0
+    score += pts; breakdown["rsi"] = f"+{pts:.1f}(rsi:{rsi:.0f})"
+
+    # 3. EMA Stack
+    e9, e21, e50 = last["ema9"], last["ema21"], last["ema50"]
+    if direction == "LONG":
+        if e9 > e21 > e50: pts = W["ema_stack"]
+        elif e9 > e21:     pts = W["ema_stack"] * 0.6
+        else:              pts = 0
+    else:
+        if e9 < e21 < e50: pts = W["ema_stack"]
+        elif e9 < e21:     pts = W["ema_stack"] * 0.6
+        else:              pts = 0
+    score += pts; breakdown["ema"] = f"+{pts:.1f}"
+
+    # 4. Volume (menggunakan BASE_VOL_SPIKE yang lebih rendah)
+    vr = last["vol_ratio"]
+    br = last["buy_ratio"]
+    if vr >= BASE_VOL_SPIKE:
+        if direction == "LONG" and last["close"] > last["open"] and br > 0.52:
+            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
+            score += pts; breakdown["vol"] = f"+{pts:.1f}({vr:.1f}x)"
+        elif direction == "SHORT" and last["close"] < last["open"] and br < 0.48:
+            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
+            score += pts; breakdown["vol"] = f"+{pts:.1f}({vr:.1f}x)"
+        else: breakdown["vol"] = f"ambigu({vr:.1f}x)"
+    else: breakdown["vol"] = f"no spike({vr:.1f}x)"
+
+    # 5. OB Imbalance
+    if direction == "LONG" and ob_imb > 0.10:
+        pts = W["ob_imbalance"] * min(ob_imb / 0.10, 1.5)
+        score += pts; breakdown["ob"] = f"+{pts:.1f}({ob_imb:+.2f})"
+    elif direction == "SHORT" and ob_imb < -0.10:
+        pts = W["ob_imbalance"] * min(abs(ob_imb) / 0.10, 1.5)
+        score += pts; breakdown["ob"] = f"+{pts:.1f}({ob_imb:+.2f})"
+    else: breakdown["ob"] = f"neutral({ob_imb:+.2f})"
+
+    # 6. Cumulative Delta
+    if direction == "LONG" and cum_d > 0.10:
+        score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}"
+    elif direction == "SHORT" and cum_d < -0.10:
+        score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}"
+    else: breakdown["delta"] = "0"
+
+    # 7. Stochastic
+    k, d_ = last["stk"], last["std"]
+    pk, pd_ = prev["stk"], prev["std"]
+    if direction == "LONG" and k < 35 and k > d_ and pk <= pd_:
+        score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}"
+    elif direction == "SHORT" and k > 65 and k < d_ and pk >= pd_:
+        score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}"
+    else: breakdown["stoch"] = "0"
+
+    # 8. Bollinger Band (lebih penting di scalp)
+    price = last["close"]
+    if direction == "LONG" and price <= last["bb_lo"] * 1.005:
+        score += W["bb"]; breakdown["bb"] = f"+{W['bb']}(BB_lo)"
+    elif direction == "SHORT" and price >= last["bb_hi"] * 0.995:
+        score += W["bb"]; breakdown["bb"] = f"+{W['bb']}(BB_hi)"
+    else: breakdown["bb"] = "0"
+
+    # 9. Funding
+    funding  = funding_avg
+    trend_mult = 1.5 if (direction == "LONG" and funding_trend == "falling") or \
+                        (direction == "SHORT" and funding_trend == "rising") else 1.0
+    if direction == "LONG" and funding < -FUNDING_THRESHOLD:
+        pts = W["funding"] * trend_mult; score += pts
+        breakdown["funding"] = f"+{pts:.1f}({funding:.3f}%)"
+    elif direction == "SHORT" and funding > FUNDING_THRESHOLD:
+        pts = W["funding"] * trend_mult; score += pts
+        breakdown["funding"] = f"+{pts:.1f}({funding:.3f}%)"
+    else: breakdown["funding"] = f"neutral({funding:.3f}%)"
+
+    # 10. BARU: Bonus dari mode (trend/mean-rev) + 5m signals
+    mode_pts = min(mode_score / 100 * W["momentum_5m"], W["momentum_5m"])
+    sig_pts  = min(signal_5m_count * 3, W["momentum_5m"])
+    bonus    = round(max(mode_pts, sig_pts), 1)
+    score   += bonus
+    breakdown["5m_bonus"] = f"+{bonus}"
+
+    # Normalise
+    max_possible = sum(W.values()) * 1.5
+    return min(score / max_possible * 100, 100), breakdown
 
 # ════════════════════════════════════════════════════
-#  MASTER ENTRY FILTER
+#  S/R LEVELS
 # ════════════════════════════════════════════════════
-def should_enter(symbol, df):
-    info = {}
+def get_sr_levels(symbol):
+    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 50)
+    if df is None or len(df) < 10:
+        return {"resistance": [], "support": []}
+    highs = df["high"].values
+    lows  = df["low"].values
+    resistance, support = [], []
+    for i in range(2, len(highs) - 2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            resistance.append(highs[i])
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            support.append(lows[i])
+    return {"resistance": sorted(resistance, reverse=True)[:3],
+            "support":    sorted(support)[:3]}
 
+def check_sr_clear(symbol, price, direction):
+    sr = get_sr_levels(symbol)
+    if direction == "LONG":
+        nearby = [r for r in sr["resistance"] if r > price]
+        if nearby:
+            nearest  = min(nearby)
+            gap_pct  = (nearest - price) / price
+            if gap_pct < SR_BUFFER:
+                return False, f"Dekat resistance {nearest:.4f} ({gap_pct*100:.2f}%)"
+    else:
+        nearby = [s for s in sr["support"] if s < price]
+        if nearby:
+            nearest = max(nearby)
+            gap_pct = (price - nearest) / price
+            if gap_pct < SR_BUFFER:
+                return False, f"Dekat support {nearest:.4f} ({gap_pct*100:.2f}%)"
+    return True, ""
+
+# ════════════════════════════════════════════════════
+#  SMART COOLDOWN
+# ════════════════════════════════════════════════════
+def is_cooldown_active():
+    global _in_cooldown
+    if not _in_cooldown: return False
+    if _macro["btc_trend_15m"] in COOLDOWN_BTC_RECOVER and \
+       _macro["market_breadth"] >= COOLDOWN_BREADTH_MIN:
+        _in_cooldown = False
+        print(f"  ✅ Cooldown berakhir! BTC:{_macro['btc_trend_15m']} Breadth:{_macro['market_breadth']*100:.0f}%")
+        return False
+    return True
+
+def cooldown_reason():
+    r = []
+    if _macro["btc_trend_15m"] in COOLDOWN_BTC_BAD: r.append(f"BTC {_macro['btc_trend_15m']}")
+    if _macro["market_breadth"] < COOLDOWN_BREADTH_MIN: r.append(f"Breadth {_macro['market_breadth']*100:.0f}%")
+    return " & ".join(r) if r else "kondisi buruk"
+
+# ════════════════════════════════════════════════════
+#  MASTER ENTRY FILTER — Scalp Version
+# ════════════════════════════════════════════════════
+def should_enter(symbol, df_15m):
+    """
+    Pipeline entry scalping:
+    1. Macro filter (F&G, news, USDT.D)
+    2. 1H Bias → tentukan direction yang diizinkan
+    3. Scalp mode (TREND vs MEAN_REV) → tentukan setup yang dicari
+    4. 15m score → setup valid?
+    5. 5m trigger → timing entry presisi
+    6. S/R check + SL validation
+    """
     if is_cooldown_active():
         return None, 0, 0, 0, {"skip": f"🧊 Cooldown ({cooldown_reason()})"}
 
-    fng      = _macro["fng"]
-    news     = _macro["news"]
-    usdt_up  = _macro["usdt_d"] > _macro["usdt_prev"] + USDT_RISK_OFF_DELTA
-    mcap_bad = _macro["global_mcap_chg"] < -2.0
+    fng  = _macro["fng"]
+    news = _macro["news"]
 
     if fng < MIN_FNG_ANY:
-        return None, 0, 0, 0, {"skip": f"F&G ekstrem rendah ({fng}) — skip semua"}
-    if fng < MIN_FNG:
-        return None, 0, 0, 0, {"skip": f"F&G terlalu rendah ({fng})"}
-    if news in ("strong_negative", "negative"):
-        return None, 0, 0, 0, {"skip": f"News {news} (skor:{_macro['news_strength']})"}
-    if usdt_up:
-        return None, 0, 0, 0, {"skip": f"USDT.D naik risk-off ({_macro['usdt_prev']}→{_macro['usdt_d']})"}
+        return None, 0, 0, 0, {"skip": f"F&G terlalu ekstrem ({fng})"}
+    if news in ("strong_negative",):
+        return None, 0, 0, 0, {"skip": f"News {news}"}
 
-    info["btc_15m"] = _macro["btc_trend_15m"]
-    info["btc_1h"]  = _macro["btc_trend_1h"]
-    info["btc_4h"]  = _macro["btc_trend_4h"]
+    # ── STEP 2: 1H Bias ──────────────────────────────────────
+    bias_dir, bias_conf = get_1h_bias(symbol)
+    if bias_dir == "NONE" and _macro["scalp_mode"] == "TREND":
+        # Di mode trend, kalau 1H tidak jelas → skip
+        return None, 0, 0, 0, {"skip": f"1H bias tidak jelas (conf:{bias_conf:.0f}%)"}
 
-    breadth = _macro["market_breadth"]
-    info["breadth"] = f"{breadth*100:.0f}%"
-
-    regime = get_regime(symbol)
-    info["regime"] = regime
-
-    prev_candle_time = int(df["time"].iloc[-2])
-    df_closed = df.iloc[:-1].copy()
-    if len(df_closed) < 60:
-        return None, 0, 0, 0, {"skip": "Data tidak cukup"}
+    # ── STEP 3: 15m setup ────────────────────────────────────
+    prev_candle_time = int(df_15m["time"].iloc[-2])
     if _last_candle.get(symbol) == prev_candle_time:
-        return None, 0, 0, 0, {"skip": "Sudah dianalisa candle ini"}
+        return None, 0, 0, 0, {"skip": "Candle sama, skip"}
+
+    df_closed = df_15m.iloc[:-1].copy()
+    if len(df_closed) < 50:
+        return None, 0, 0, 0, {"skip": "Data kurang"}
 
     df_closed = run_ta(df_closed)
 
-    # ── Filter murah dulu (tidak butuh API call tambahan) ─────
-    # Cek BTC multi-TF, breadth, regime sebelum lanjut ke API call mahal
+    # Pilih mode scalp
+    scalp_mode = _macro["scalp_mode"]
+    direction  = None
+    mode_score = 0
 
-    # Deteksi arah sementara dari TA dasar (untuk early reject)
-    # Pakai MACD + EMA stack sebagai proxy cepat
-    _last_row = df_closed.iloc[-1]
-    _e9, _e21 = _last_row["ema9"], _last_row["ema21"]
-    _hist = _last_row["macd_hist"]
-    _pre_dir = "LONG" if (_e9 > _e21 and _hist > 0) else ("SHORT" if (_e9 < _e21 and _hist < 0) else "NONE")
+    if scalp_mode == "MEAN_REV":
+        # Mean reversion: BB bounce
+        direction, mode_score = check_mean_reversion_setup(df_closed, symbol)
+        if direction is None:
+            return None, 0, 0, 0, {"skip": "MeanRev: tidak ada BB bounce setup"}
+    else:
+        # Trend mode: gunakan bias 1H, cari pullback ke EMA
+        if bias_dir == "NONE":
+            return None, 0, 0, 0, {"skip": "Trend mode tapi bias tidak jelas"}
+        direction, mode_score = check_trend_pullback_setup(df_closed, bias_dir)
+        if direction is None:
+            # Fallback: kalau tidak ada pullback, cek apakah ada momentum breakout
+            # (harga baru saja melewati EMA21 dengan volume)
+            last = df_closed.iloc[-1]
+            e21  = last["ema21"]
+            price = last["close"]
+            if bias_dir == "LONG" and price > e21 and last["vol_ratio"] > 1.3:
+                direction, mode_score = "LONG", 65
+            elif bias_dir == "SHORT" and price < e21 and last["vol_ratio"] > 1.3:
+                direction, mode_score = "SHORT", 65
+            else:
+                return None, 0, 0, 0, {"skip": f"Trend mode: tidak ada EMA pullback ({bias_dir})"}
 
-    if _pre_dir != "NONE":
-        # Cek BTC & breadth lebih awal sebelum fetch OB/funding
-        btc_pre_ok, btc_pre_reason = btc_multi_tf_ok_for(_pre_dir)
-        if not btc_pre_ok:
-            return None, 0, 0, 0, {"skip": btc_pre_reason}
+    # Validasi direction vs macro
+    btc_t1h = _macro["btc_trend_1h"]
+    btc_t4h = _macro["btc_trend_4h"]
+    if direction == "LONG":
+        if btc_t4h in BEAR_TRENDS:
+            return None, 0, 0, 0, {"skip": f"BTC 4H={btc_t4h} BEAR — skip LONG"}
+        if fng > MAX_FNG_LONG:
+            return None, 0, 0, 0, {"skip": f"F&G terlalu greedy ({fng})"}
+        if _macro["market_breadth"] < MIN_MARKET_BREADTH:
+            return None, 0, 0, 0, {"skip": f"Breadth rendah ({_macro['market_breadth']*100:.0f}%)"}
+    elif direction == "SHORT":
+        if btc_t4h in BULL_TRENDS and btc_t1h in BULL_TRENDS:
+            return None, 0, 0, 0, {"skip": f"BTC 4H+1H BULL — skip SHORT"}
 
-        if _pre_dir == "LONG" and breadth < MIN_MARKET_BREADTH:
-            return None, 0, 0, 0, {"skip": f"Market breadth rendah ({breadth*100:.0f}%)"}
-        if _pre_dir == "SHORT" and breadth > 0.65:
-            return None, 0, 0, 0, {"skip": f"Market breadth tinggi ({breadth*100:.0f}%), skip SHORT"}
+    # ── STEP 4: 5m entry trigger ──────────────────────────────
+    sig_count, sig_list = get_5m_entry_signals(symbol, direction)
+    if sig_count < MIN_5M_SIGNALS and mode_score < 80:
+        # Pengecualian: kalau mode_score sangat tinggi, cukup 1 sinyal 5m
+        if sig_count < 1:
+            return None, 0, 0, 0, {
+                "skip": f"5m trigger tidak cukup ({sig_count}/{MIN_5M_SIGNALS}): {sig_list}"}
 
-        if _pre_dir == "LONG" and regime == "BEAR":
-            return None, 0, 0, 0, {"skip": "Regime BEAR — tidak LONG"}
-        if _pre_dir == "SHORT" and regime == "BULL":
-            return None, 0, 0, 0, {"skip": "Regime BULL — tidak SHORT"}
+    # ── STEP 5: 15m composite score ──────────────────────────
+    ob_imb  = get_ob_imbalance(symbol)
+    cum_d   = get_cum_delta(df_closed)
+    fund_avg, fund_trend = get_funding(symbol)
 
-    # ── Baru fetch data mahal (OB + funding) ─────────────────
-    time.sleep(0.15)   # throttle sebelum 2 API call berikutnya
-    ob_imb    = get_ob_imbalance(symbol)
-    cum_d     = get_cum_delta(df_closed)
+    score, breakdown = calc_15m_score(
+        df_closed, direction, ob_imb, cum_d, fund_avg, fund_trend,
+        mode_score, sig_count)
 
-    # FIX 3: funding sekarang tuple (avg, trend)
-    time.sleep(0.15)
-    funding_avg, funding_trend = get_funding(symbol)
-
-    ta_dir, score, breakdown = calc_composite_score(
-        df_closed, regime, ob_imb, cum_d, funding_avg, funding_trend)
-    info["score"]     = f"{score:.1f}/100"
-    info["breakdown"] = breakdown
-
-    if ta_dir == "NONE":
+    if score < MIN_COMPOSITE_SCORE:
         return None, 0, 0, 0, {"skip": f"Score rendah ({score:.1f}/100)"}
 
-    if ta_dir == "LONG" and fng > MAX_FNG_LONG:
-        return None, 0, 0, 0, {"skip": f"F&G terlalu greedy ({fng}) — euphoria risk LONG"}
-    if mcap_bad and ta_dir == "LONG":
-        return None, 0, 0, 0, {"skip": f"Global mcap turun {_macro['global_mcap_chg']:.1f}% — skip LONG"}
-
-    # Re-check BTC/breadth/regime dengan arah final dari composite score
-    # (early reject pakai proxy, ini konfirmasi dengan arah yang lebih akurat)
-    btc_ok, btc_reason = btc_multi_tf_ok_for(ta_dir)
-    if not btc_ok:
-        return None, 0, 0, 0, {"skip": btc_reason}
-
-    if ta_dir == "LONG" and breadth < MIN_MARKET_BREADTH:
-        return None, 0, 0, 0, {"skip": f"Market breadth rendah ({breadth*100:.0f}%)"}
-    if ta_dir == "SHORT" and breadth > 0.65:
-        return None, 0, 0, 0, {"skip": f"Market breadth tinggi ({breadth*100:.0f}%), skip SHORT"}
-
-    if ta_dir == "LONG" and regime == "BEAR":
-        return None, 0, 0, 0, {"skip": "Regime BEAR — tidak LONG"}
-    if ta_dir == "SHORT" and regime == "BULL":
-        return None, 0, 0, 0, {"skip": "Regime BULL — tidak SHORT"}
-
-    # FIX 2: volume spike check dengan threshold adaptif
-    vol_ok, vol_info = check_volume_spike_confirm(df_closed, ta_dir)
-    if not vol_ok:
-        return None, 0, 0, 0, {"skip": f"Tidak ada volume spike ({vol_info})"}
-    info["vol_spike"] = vol_info
-
-    sr_ok, sr_reason = check_sr_clear(symbol, df_closed["close"].iloc[-1], ta_dir)
+    # ── STEP 6: S/R check ────────────────────────────────────
+    price = df_closed["close"].iloc[-1]
+    sr_ok, sr_reason = check_sr_clear(symbol, price, direction)
     if not sr_ok:
         return None, 0, 0, 0, {"skip": f"S/R: {sr_reason}"}
-    info["sr"] = "clear"
 
-    whale_dir, whale_ratio = detect_whale(df_closed)
-    info["whale"] = f"{whale_dir}({whale_ratio:.1f}x)"
-    if ta_dir == "LONG" and whale_dir == "sell_whale":
-        return None, 0, 0, 0, {"skip": "Whale sell aktif"}
-    if ta_dir == "SHORT" and whale_dir == "buy_whale":
-        return None, 0, 0, 0, {"skip": "Whale buy aktif"}
+    # ── SL/TP kalkulasi ──────────────────────────────────────
+    atr = df_closed["atr"].iloc[-1]
+    sl_dist = max(ATR_SL_MULT * atr, price * 0.003)  # minimal 0.3%
 
-    # FIX 3: gunakan threshold yang dinaikkan
-    info["funding"] = f"{funding_avg:.4f}%({funding_trend})"
-    if ta_dir == "LONG" and funding_avg > FUNDING_THRESHOLD * 1.25:
-        return None, 0, 0, 0, {"skip": f"Funding terlalu positif ({funding_avg:.4f}%) — long squeeze risk"}
-    if ta_dir == "SHORT" and funding_avg < -FUNDING_THRESHOLD * 1.25:
-        return None, 0, 0, 0, {"skip": f"Funding terlalu negatif ({funding_avg:.4f}%) — short squeeze risk"}
-
-    bb_width = df_closed["bb_width"].iloc[-1]
-    info["bb_width"] = round(bb_width, 4)
-    if bb_width < 0.01:
-        return None, 0, 0, 0, {"skip": "BB terlalu sempit, choppy"}
-
-    atr   = df_closed["atr"].iloc[-1]
-    price = df_closed["close"].iloc[-1]
-    if ta_dir == "LONG":
-        sl_price  = round(price - ATR_SL_MULT  * atr, 8)
+    if direction == "LONG":
+        sl_price  = round(price - sl_dist, 8)
         tp1_price = round(price + ATR_TP1_MULT * atr, 8)
         tp2_price = round(price + ATR_TP2_MULT * atr, 8)
     else:
-        sl_price  = round(price + ATR_SL_MULT  * atr, 8)
+        sl_price  = round(price + sl_dist, 8)
         tp1_price = round(price - ATR_TP1_MULT * atr, 8)
         tp2_price = round(price - ATR_TP2_MULT * atr, 8)
 
     sl_pct = abs(price - sl_price) / price
-    if sl_pct > 0.04:
+    tp1_pct = abs(tp1_price - price) / price
+
+    if sl_pct > MAX_SL_PCT:
         return None, 0, 0, 0, {"skip": f"ATR terlalu besar (SL={sl_pct*100:.1f}%)"}
+    if tp1_pct / sl_pct < MIN_RR:
+        return None, 0, 0, 0, {"skip": f"R:R buruk ({tp1_pct/sl_pct:.2f}x, min {MIN_RR}x)"}
 
     _last_candle[symbol] = prev_candle_time
-    info["atr_sl_pct"] = f"{sl_pct*100:.2f}%"
-    info["ob"]   = ob_imb
-    info["ta"]   = ta_dir
-    return ta_dir, sl_price, tp1_price, tp2_price, info
+
+    info = {
+        "score":     f"{score:.1f}/100",
+        "mode":      scalp_mode,
+        "bias_1h":   f"{bias_dir}({bias_conf:.0f}%)",
+        "btc_1h":    btc_t1h,
+        "btc_4h":    btc_t4h,
+        "5m_signals": f"{sig_count}: {', '.join(sig_list[:2])}",
+        "mode_score": f"{mode_score}",
+        "funding":   f"{fund_avg:.4f}%({fund_trend})",
+        "sl_pct":    f"{sl_pct*100:.2f}%",
+        "rr":        f"{tp1_pct/sl_pct:.2f}x",
+        "breadth":   f"{_macro['market_breadth']*100:.0f}%",
+        "breakdown": breakdown,
+    }
+
+    return direction, sl_price, tp1_price, tp2_price, info
 
 # ════════════════════════════════════════════════════
 #  TRADE EXECUTION
@@ -1018,32 +1064,35 @@ def open_trade(symbol, side, sl_price, tp1_price, tp2_price, info):
         trail_sl = entry * (1 - TRAIL_PCT) if side == "LONG" else entry * (1 + TRAIL_PCT)
 
         open_positions[symbol] = {
-            "side":      side,
-            "entry":     entry,
-            "qty":       qty,
-            "qty_remain": qty,
-            "sl":        sl_price,
-            "tp1":       tp1_price,
-            "tp2":       tp2_price,
-            "peak":      entry,
-            "trail_sl":  trail_sl,
-            "trailing_active": False,
-            "tp1_hit":   False,
-            "be_active": False,
+            "side":             side,
+            "entry":            entry,
+            "qty":              qty,
+            "qty_remain":       qty,
+            "sl":               sl_price,
+            "tp1":              tp1_price,
+            "tp2":              tp2_price,
+            "peak":             entry,
+            "trail_sl":         trail_sl,
+            "trailing_active":  False,
+            "tp1_hit":          False,
+            "be_active":        False,
+            "open_time":        time.time(),   # BARU: untuk force close timeout
+            "mode":             info.get("mode", "TREND"),
         }
+
         sl_pct  = abs(entry - sl_price) / entry * 100
         tp1_pct = abs(tp1_price - entry) / entry * 100
         tp2_pct = abs(tp2_price - entry) / entry * 100
         score   = info.get("score", "?")
-        print(f"  ✅ [{symbol}] {side} @{entry:.5f} qty={qty}")
+
+        print(f"\n  ✅ [{symbol}] {side} ENTRY @{entry:.5f} | qty={qty}")
         print(f"     SL:{sl_price:.5f}(-{sl_pct:.2f}%) TP1:{tp1_price:.5f}(+{tp1_pct:.2f}%) TP2:{tp2_price:.5f}(+{tp2_pct:.2f}%)")
-        print(f"     Score:{score} BTC:{info.get('btc_15m','?')}/{info.get('btc_1h','?')}/{info.get('btc_4h','?')}")
-        print(f"     Vol:{info.get('vol_spike','?')} Funding:{info.get('funding','?')}")
+        print(f"     Score:{score} | Mode:{info.get('mode','?')} | Bias1H:{info.get('bias_1h','?')}")
+        print(f"     5m:{info.get('5m_signals','?')} | R:R={info.get('rr','?')} | Fund:{info.get('funding','?')}")
     except Exception as e:
         print(f"  ❌ [{symbol}] Gagal entry: {e}")
 
 def partial_close(symbol, reason="TP1"):
-    global _consec_loss
     pos = open_positions.get(symbol)
     if pos is None: return
 
@@ -1053,14 +1102,10 @@ def partial_close(symbol, reason="TP1"):
             pos["tp1_hit"] = True
             return
 
-        # Guard: pastikan close_qty tidak melebihi posisi aktual
-        half_qty    = round_step(abs(amt) * 0.5, get_sym_info(symbol)["step"])
-        min_qty     = get_sym_info(symbol)["minQty"]
-        close_qty   = max(half_qty, min_qty)
-
-        # FIX: kalau close_qty > abs(amt), tutup semua daripada over-close
-        if close_qty > abs(amt):
-            close_qty = abs(amt)
+        half_qty  = round_step(abs(amt) * 0.5, get_sym_info(symbol)["step"])
+        min_qty   = get_sym_info(symbol)["minQty"]
+        close_qty = max(half_qty, min_qty)
+        if close_qty > abs(amt): close_qty = abs(amt)
 
         client.futures_create_order(
             symbol=symbol,
@@ -1075,8 +1120,9 @@ def partial_close(symbol, reason="TP1"):
                 else (pos["entry"] - exit_price) * close_qty
         pct   = pnl / (pos["entry"] * close_qty) * 100
 
-        print(f"  🎯 [{symbol}] PARTIAL TP1 — {reason}")
-        print(f"     💛 P&L (50%): {pnl:+.4f} USDT ({pct:+.2f}%)")
+        hold_min = (time.time() - pos["open_time"]) / 60
+        print(f"  🎯 [{symbol}] PARTIAL TP1 — {reason} | Hold:{hold_min:.0f}m")
+        print(f"     💛 P&L (50%): {pnl:+.4f}U ({pct:+.2f}%)")
 
         pos["tp1_hit"]         = True
         pos["qty_remain"]      = abs(amt) - close_qty
@@ -1087,7 +1133,6 @@ def partial_close(symbol, reason="TP1"):
         pos["trail_sl"]        = exit_price * (1 - TRAIL_PCT) if side == "LONG" \
                                  else exit_price * (1 + TRAIL_PCT)
 
-        print(f"     🔒 Break-even SL @{pos['entry']:.5f} | Trailing aktif")
         trade_log.append({"symbol": symbol, "side": side,
                           "pnl": round(pnl, 4), "reason": f"Partial {reason}"})
     except Exception as e:
@@ -1107,10 +1152,8 @@ def close_trade(symbol, reason=""):
                 exit_ = get_price(symbol)
                 if exit_ > 0:
                     qty_r = pos.get("qty_remain", pos["qty"])
-                    pnl = (exit_ - pos["entry"]) * qty_r if pos["side"] == "LONG" \
-                          else (pos["entry"] - exit_) * qty_r
-                    pct = pnl / (pos["entry"] * qty_r) * 100 if qty_r > 0 else 0
-                    print(f"  ⚠️  [{symbol}] Sudah tutup di exchange — Est P&L: {pnl:+.4f}U ({pct:+.2f}%)")
+                    pnl   = (exit_ - pos["entry"]) * qty_r if pos["side"] == "LONG" \
+                            else (pos["entry"] - exit_) * qty_r
                     trade_log.append({"symbol": symbol, "side": pos["side"],
                                       "pnl": round(pnl, 4), "reason": "External close"})
                     _update_loss_streak(pnl)
@@ -1130,9 +1173,10 @@ def close_trade(symbol, reason=""):
                     else (pos["entry"] - exit_) * qty_r
             pct   = pnl / (pos["entry"] * qty_r) * 100 if qty_r > 0 else 0
             emoji = "🟢" if pnl >= 0 else "🔴"
+            hold_min = (time.time() - pos.get("open_time", time.time())) / 60
             be_tag = " [BE]" if pos.get("be_active") else ""
-            print(f"  💰 [{symbol}] CLOSED — {reason}{be_tag}")
-            print(f"     {emoji} P&L (sisa): {pnl:+.4f} USDT ({pct:+.2f}%)")
+            print(f"  💰 [{symbol}] CLOSED — {reason}{be_tag} | Hold:{hold_min:.0f}m")
+            print(f"     {emoji} P&L: {pnl:+.4f}U ({pct:+.2f}%)")
             trade_log.append({"symbol": symbol, "side": pos["side"],
                               "pnl": round(pnl, 4), "reason": reason})
             _update_loss_streak(pnl)
@@ -1152,13 +1196,10 @@ def _update_loss_streak(pnl):
             breadth_bad = _macro["market_breadth"] < COOLDOWN_BREADTH_MAX
             if btc_bad or breadth_bad:
                 _in_cooldown = True
-                reasons = []
-                if btc_bad:     reasons.append(f"BTC {_macro['btc_trend_15m']}")
-                if breadth_bad: reasons.append(f"breadth {_macro['market_breadth']*100:.0f}%")
-                print(f"  🧊 {MAX_CONSEC_LOSS} loss + market buruk ({', '.join(reasons)}) → Cooldown!")
+                print(f"  🧊 {MAX_CONSEC_LOSS} loss + market buruk → Cooldown!")
             else:
-                print(f"  ⚡ {MAX_CONSEC_LOSS} loss tapi market masih oke → lanjut trading")
                 _consec_loss = 0
+                print(f"  ⚡ {MAX_CONSEC_LOSS} loss tapi market masih oke → lanjut scalp")
     else:
         _consec_loss = 0
         if _in_cooldown:
@@ -1169,120 +1210,106 @@ def _update_loss_streak(pnl):
 #  POSITION MANAGEMENT
 # ════════════════════════════════════════════════════
 def manage_positions():
-    """
-    FIX 4: Flash crash/pump detector ditambah di sini.
-    Dijalankan SETIAP cycle sebelum check normal SL/TP.
-    Tidak perlu tunggu candle 1H/4H closed.
-    """
-    # ── FIX 4: Cek flash crash/pump dulu ─────────────────────
+    # Flash crash/pump exit
     flash_dir, flash_pct = detect_flash_move()
     if flash_dir != "none" and open_positions:
         for symbol in list(open_positions.keys()):
             pos  = open_positions[symbol]
             side = pos["side"]
             if flash_dir == "crash" and side == "LONG":
-                close_trade(symbol,
-                    f"🚨 Flash Crash BTC -{flash_pct:.2f}% dalam {FLASH_WINDOW_SEC//60}m — exit LONG")
+                close_trade(symbol, f"🚨 Flash Crash -{flash_pct:.2f}%")
                 continue
             elif flash_dir == "pump" and side == "SHORT":
-                close_trade(symbol,
-                    f"🚨 Flash Pump BTC +{flash_pct:.2f}% dalam {FLASH_WINDOW_SEC//60}m — exit SHORT")
+                close_trade(symbol, f"🚨 Flash Pump +{flash_pct:.2f}%")
                 continue
 
     for symbol in list(open_positions.keys()):
         pos   = open_positions[symbol]
         price = get_price(symbol)
-        if price == 0:
-            print(f"  ⚠️  [{symbol}] Tidak bisa get price, skip")
-            continue
+        if price == 0: continue
 
         entry = pos["entry"]
         side  = pos["side"]
 
-        # Emergency exits (news + BTC multi-TF — tetap ada untuk kondisi non-flash)
+        # BARU: Force close setelah MAX_HOLDING_MINUTES (scalp tidak boleh hold lama)
+        hold_min = (time.time() - pos.get("open_time", time.time())) / 60
+        if hold_min >= MAX_HOLDING_MINUTES:
+            close_trade(symbol, f"⏰ Force close ({hold_min:.0f}m > {MAX_HOLDING_MINUTES}m)")
+            continue
+
+        # Emergency exits
         if _macro["news"] in ("strong_negative",):
-            close_trade(symbol, "🚨 Emergency — strong bad news")
+            close_trade(symbol, "🚨 Bad news emergency")
             continue
 
-        # FIX 4: Untuk exit berbasis trend (bukan flash), tetap butuh 1H+4H confirm
-        # supaya tidak exit karena 15m noise
         if side == "LONG" and _macro["btc_trend_1h"] == "BEAR" and _macro["btc_trend_4h"] == "BEAR":
-            close_trade(symbol, "⚡ BTC 1H+4H BEAR — emergency exit LONG")
+            close_trade(symbol, "⚡ BTC 1H+4H BEAR")
             continue
-
         if side == "SHORT" and _macro["btc_trend_1h"] == "BULL" and _macro["btc_trend_4h"] == "BULL":
-            close_trade(symbol, "⚡ BTC 1H+4H BULL — emergency exit SHORT")
+            close_trade(symbol, "⚡ BTC 1H+4H BULL")
             continue
 
         if side == "LONG":
             profit_pct = (price - entry) / entry
 
             if not pos["tp1_hit"] and price >= pos["tp1"]:
-                partial_close(symbol, "TP1")
-                continue
+                partial_close(symbol, "TP1"); continue
 
             if not pos["trailing_active"] and profit_pct >= TRAIL_TRIGGER:
                 pos["trailing_active"] = True
                 pos["trail_sl"] = price * (1 - TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif @{price:.5f} (+{profit_pct*100:.2f}%)")
+                print(f"  🔄 [{symbol}] Trailing aktif +{profit_pct*100:.2f}%")
 
             if pos["trailing_active"] and price > pos["peak"]:
                 pos["peak"]     = price
                 pos["trail_sl"] = price * (1 - TRAIL_PCT)
 
             if pos["tp1_hit"] and price >= pos["tp2"]:
-                close_trade(symbol, "✨ TP2 (sisa 50%)")
-                continue
+                close_trade(symbol, "✨ TP2"); continue
 
             if pos["trailing_active"] and price <= pos["trail_sl"]:
-                close_trade(symbol, "🔄 Trailing Stop")
-                continue
+                close_trade(symbol, "🔄 Trailing Stop"); continue
 
             if price <= pos["sl"]:
-                reason = "🔒 Break-even Stop" if pos.get("be_active") else "🛑 STOP LOSS"
-                close_trade(symbol, reason)
-                continue
+                reason = "🔒 Break-even" if pos.get("be_active") else "🛑 Stop Loss"
+                close_trade(symbol, reason); continue
 
             pnl_now = (price - entry) * pos.get("qty_remain", pos["qty"])
-            be_tag  = " [BE]" if pos.get("be_active") else ""
-            tp_tag  = f" TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f" TP1:{pos['tp1']:.4f}"
+            be_tag  = "[BE]" if pos.get("be_active") else ""
             tsl     = f" TSL:{pos['trail_sl']:.4f}" if pos["trailing_active"] else ""
-            print(f"  📌 [{symbol}] LONG @{entry:.4f}→{price:.4f}{be_tag} | {pnl_now:+.3f}U{tsl}{tp_tag}")
+            tp_tag  = f"TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.4f}"
+            print(f"  📌 [{symbol}] LONG @{entry:.4f}→{price:.4f} {be_tag}| {pnl_now:+.3f}U | {hold_min:.0f}m | {tsl} {tp_tag}")
 
         else:  # SHORT
             profit_pct = (entry - price) / entry
 
             if not pos["tp1_hit"] and price <= pos["tp1"]:
-                partial_close(symbol, "TP1")
-                continue
+                partial_close(symbol, "TP1"); continue
 
             if not pos["trailing_active"] and profit_pct >= TRAIL_TRIGGER:
                 pos["trailing_active"] = True
                 pos["trail_sl"] = price * (1 + TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif @{price:.5f} (+{profit_pct*100:.2f}%)")
+                print(f"  🔄 [{symbol}] Trailing aktif +{profit_pct*100:.2f}%")
 
             if pos["trailing_active"] and price < pos["peak"]:
                 pos["peak"]     = price
                 pos["trail_sl"] = price * (1 + TRAIL_PCT)
 
             if pos["tp1_hit"] and price <= pos["tp2"]:
-                close_trade(symbol, "✨ TP2 (sisa 50%)")
-                continue
+                close_trade(symbol, "✨ TP2"); continue
 
             if pos["trailing_active"] and price >= pos["trail_sl"]:
-                close_trade(symbol, "🔄 Trailing Stop")
-                continue
+                close_trade(symbol, "🔄 Trailing Stop"); continue
 
             if price >= pos["sl"]:
-                reason = "🔒 Break-even Stop" if pos.get("be_active") else "🛑 STOP LOSS"
-                close_trade(symbol, reason)
-                continue
+                reason = "🔒 Break-even" if pos.get("be_active") else "🛑 Stop Loss"
+                close_trade(symbol, reason); continue
 
             pnl_now = (entry - price) * pos.get("qty_remain", pos["qty"])
-            be_tag  = " [BE]" if pos.get("be_active") else ""
-            tp_tag  = f" TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f" TP1:{pos['tp1']:.4f}"
+            be_tag  = "[BE]" if pos.get("be_active") else ""
             tsl     = f" TSL:{pos['trail_sl']:.4f}" if pos["trailing_active"] else ""
-            print(f"  📌 [{symbol}] SHORT @{entry:.4f}→{price:.4f}{be_tag} | {pnl_now:+.3f}U{tsl}{tp_tag}")
+            tp_tag  = f"TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.4f}"
+            print(f"  📌 [{symbol}] SHORT @{entry:.4f}→{price:.4f} {be_tag}| {pnl_now:+.3f}U | {hold_min:.0f}m | {tsl} {tp_tag}")
 
 # ════════════════════════════════════════════════════
 #  SUMMARY
@@ -1295,7 +1322,7 @@ def print_summary():
     wr    = wins / n * 100 if n else 0
     cd    = f" | 🧊 Cooldown ({cooldown_reason()})" if _in_cooldown else ""
     print(f"\n  📊 {n} trades | WR:{wr:.0f}% W:{wins} L:{n-wins} | P&L:{total:+.4f}U | streak:{_consec_loss}L{cd}")
-    for t in trade_log[-3:]:
+    for t in trade_log[-5:]:
         e = "🟢" if t["pnl"] > 0 else "🔴"
         print(f"     {e} {t['symbol']} {t['side']} {t['pnl']:+.4f}U — {t['reason'][:40]}")
 
@@ -1303,117 +1330,102 @@ def print_summary():
 #  MAIN LOOP
 # ════════════════════════════════════════════════════
 def run_bot():
-    print("🤖 Bot v9-Fixed — Batch Scan + Adaptive Vol + Avg Funding + Flash Exit")
-    print(f"   Leverage      : {LEVERAGE}x | Order: ${ORDER_USDT} USDT")
-    print(f"   Batch Scan    : {BATCH_SIZE} simbol/cycle (hemat ~{28//BATCH_SIZE}x API call per cycle)")
-    print(f"   OHLCV Cache   : 15m={OHLCV_CACHE_TTL}s | 1H/4H=~1jam (hindari refetch sia-sia)")
-    print(f"   Volume Spike  : adaptif (base {BASE_VOL_SPIKE}x + ATR%/{ATR_VOL_SCALE}), wajib ≥{VOL_SPIKE_MIN_CANDLES}/3 candles")
-    print(f"   Funding       : avg {FUNDING_LOOKBACK} data terakhir, threshold {FUNDING_THRESHOLD}%")
-    print(f"   Flash Exit    : BTC ≥{FLASH_CRASH_PCT}% dalam {FLASH_WINDOW_SEC//60}m → exit instan")
-    print(f"   Min Score     : {MIN_COMPOSITE_SCORE}/100")
-    print(f"   BTC Filter    : 15m + 1H + 4H harus searah")
-    print(f"   S/R Check     : 4H swing high/low, buffer {SR_BUFFER*100:.1f}%")
-    print(f"   Smart Cooldown: {MAX_CONSEC_LOSS} loss + market buruk → pause\n")
+    print("🤖 Bot Scalping v10 — 1H Bias | 15m Setup | 5m Entry")
+    print(f"   Leverage       : {LEVERAGE}x | Order: ${ORDER_USDT} USDT")
+    print(f"   TF Hierarchy   : 1H(bias) → 15m(setup) → 5m(entry)")
+    print(f"   TP1 / TP2      : {ATR_TP1_MULT}x ATR / {ATR_TP2_MULT}x ATR")
+    print(f"   SL Max         : {MAX_SL_PCT*100:.1f}% | Min R:R={MIN_RR}x")
+    print(f"   Holding Max    : {MAX_HOLDING_MINUTES} menit (force close)")
+    print(f"   Scan Interval  : {SCAN_INTERVAL}s | Batch: {BATCH_SIZE} simbol")
+    print(f"   Flash Exit     : BTC ≥{FLASH_CRASH_PCT}% dalam {FLASH_WINDOW_SEC//60}m")
+    print(f"   Min Score      : {MIN_COMPOSITE_SCORE}/100 | Min 5m signals: {MIN_5M_SIGNALS}")
+    print(f"   Scalp Modes    : TREND (EMA pullback) + MEAN_REV (BB bounce)\n")
 
-    print("  ⏳ Setup...")
+    symbols = []
+    print("  ⏳ Inisialisasi...")
     symbols = validate_symbols()
     for s in symbols: get_sym_info(s)
     refresh_macro()
-    update_btc_price_history()  # seed flash detector dengan harga awal
+    update_btc_price_history()
+
     print(f"  ✅ {len(symbols)} symbols | F&G:{_macro['fng']} | "
           f"BTC 15m:{_macro['btc_trend_15m']} 1H:{_macro['btc_trend_1h']} 4H:{_macro['btc_trend_4h']} | "
-          f"Batch:{BATCH_SIZE} simbol/cycle | News:{_macro['news']}\n")
+          f"Mode:{_macro['scalp_mode']} | News:{_macro['news']}\n")
 
     cycle = 0
     while True:
         cycle += 1
         refresh_macro()
-        update_btc_price_history()  # FIX 4: rekam harga BTC tiap cycle
+        update_btc_price_history()
 
         if _in_cooldown:
             is_cooldown_active()
 
         manage_positions()
 
-        cd_info = f" 🧊 COOLDOWN ({cooldown_reason()})" if _in_cooldown else ""
-
-        # FIX 4: Tampilkan status flash detector
         flash_dir, flash_pct = detect_flash_move()
         flash_info = f" ⚡{flash_dir.upper()}:{flash_pct:.2f}%" if flash_dir != "none" else ""
-
-        # Kumpulkan error fetch yang terjadi sejak cycle terakhir
-        # (diisi oleh get_ohlcv, bukan di-print langsung supaya log tidak berantakan)
-        fetch_errors = list(_ohlcv_errors.items())
-        _ohlcv_errors.clear()  # reset setelah ditampilkan
-
-        # FIX LOG: Semua print header dikumpulkan dulu, baru dicetak sekaligus
-        total_batches = math.ceil(len(symbols) / BATCH_SIZE)
-        next_batch_num = (_scan_batch_idx % total_batches) + 1  # batch yang akan di-scan cycle ini
+        cd_info    = f" 🧊COOLDOWN" if _in_cooldown else ""
+        mode_emoji = "📈" if _macro["scalp_mode"] == "TREND" else "↩️"
 
         print(f"\n{'='*72}")
         print(f"  🔄 #{cycle} {time.strftime('%H:%M:%S')} | F&G:{_macro['fng']}({_macro['fng_label']}) | "
-              f"USDT:{_macro['usdt_d']}% | News:{_macro['news']}(skor:{_macro['news_strength']}){cd_info}{flash_info}")
-        print(f"  📈 BTC 15m:{_macro['btc_trend_15m']} | 1H:{_macro['btc_trend_1h']} | 4H:{_macro['btc_trend_4h']}")
+              f"USDT.D:{_macro['usdt_d']}% | News:{_macro['news']}{cd_info}{flash_info}")
+        print(f"  {mode_emoji} Mode:{_macro['scalp_mode']} | BTC 15m:{_macro['btc_trend_15m']} "
+              f"1H:{_macro['btc_trend_1h']} 4H:{_macro['btc_trend_4h']}")
         print(f"  🌍 Breadth:{_macro['market_breadth']*100:.0f}% | MCap24h:{_macro['global_mcap_chg']:+.1f}%")
         for h in _macro["headlines"]: print(f"  {h}")
         print(f"  📂 Posisi({len(open_positions)}): {list(open_positions.keys()) or '-'}")
-        print(f"  🔍 Akan scan batch {next_batch_num}/{total_batches} "
-              f"(full scan selesai tiap ~{total_batches} cycle ≈ {total_batches * SCAN_INTERVAL // 60}m)")
 
-        # Tampilkan error fetch dari cycle sebelumnya di sini (bukan di tengah scan)
-        if fetch_errors:
-            unique_syms = list(dict.fromkeys(k[0] for k, v in fetch_errors))
-            print(f"  ⚠️  Fetch gagal ({len(fetch_errors)}x): {', '.join(unique_syms[:5])}"
-                  + (f" +{len(unique_syms)-5} lagi" if len(unique_syms) > 5 else ""))
-            # Tampilkan 1 contoh error message untuk debug
-            first_key, first_err = fetch_errors[0]
-            print(f"     └─ Contoh error [{first_key[0]}]: {first_err}")
-
+        total_batches = math.ceil(len(symbols) / BATCH_SIZE)
+        print(f"  🔍 Scanning batch {_scan_batch_idx + 1}/{total_batches}")
         print(f"{'='*72}")
 
-        skipped    = 0
         candidates = []
+        skipped    = 0
 
-        if len(open_positions) < MAX_POSITIONS and _macro["news"] not in ("strong_negative", "negative") \
-           and not _in_cooldown:
+        if len(open_positions) < MAX_POSITIONS and not _in_cooldown and \
+           _macro["news"] not in ("strong_negative",):
 
-            # FIX 1: Scan hanya batch saat ini, bukan semua simbol
             batch = get_current_batch([s for s in symbols if s not in open_positions])
 
             for symbol in batch:
-                # FIX 1: Jeda kecil antar API call untuk hindari burst
                 time.sleep(SCAN_DELAY_MS)
-
                 df = get_ohlcv(symbol, Client.KLINE_INTERVAL_15MINUTE, 220)
                 if df is None or len(df) < 70: continue
+
                 side, sl, tp1, tp2, info = should_enter(symbol, df)
                 if side:
                     candidates.append((symbol, side, sl, tp1, tp2, info))
                 else:
                     skipped += 1
+                    skip_reason = info.get("skip", "?")
+                    # Tampilkan hanya yang menarik (bukan skip trivial)
+                    if "Candle sama" not in skip_reason and "Data" not in skip_reason:
+                        print(f"     ⚪ {symbol}: {skip_reason}")
 
             if candidates:
                 candidates.sort(
                     key=lambda x: float(x[5].get("score", "0").split("/")[0]),
-                    reverse=True
-                )
-                print(f"\n  🎯 {len(candidates)} setup valid | {skipped} di-skip")
+                    reverse=True)
+                print(f"\n  🎯 {len(candidates)} setup valid! {skipped} skip")
                 for sym, side, sl, tp1, tp2, info in candidates[:3]:
-                    print(f"     ⭐ {sym} {side} | Score:{info.get('score','?')} | "
-                          f"Vol:{info.get('vol_spike','?')} | Funding:{info.get('funding','?')}")
+                    print(f"     ⭐ {sym} {side} | {info.get('score','?')} | "
+                          f"Mode:{info.get('mode','?')} | Bias:{info.get('bias_1h','?')}")
+                    print(f"        5m:{info.get('5m_signals','?')} | R:R={info.get('rr','?')}")
                 for sym, side, sl, tp1, tp2, info in candidates:
                     if len(open_positions) >= MAX_POSITIONS: break
                     open_trade(sym, side, sl, tp1, tp2, info)
             else:
-                print(f"  ⏳ {len(batch)} simbol di-scan (batch), belum ada setup valid")
+                print(f"  ⏳ Batch selesai, belum ada setup valid ({len(batch)} simbol di-scan)")
         else:
             if _in_cooldown:
                 print(f"  🧊 Cooldown — {cooldown_reason()}")
             else:
-                print(f"  ⏸️  Posisi penuh atau kondisi tidak aman")
+                print(f"  ⏸️  Posisi penuh ({len(open_positions)}/{MAX_POSITIONS})")
 
         print_summary()
-        print(f"\n  ⏱️  {SCAN_INTERVAL}s...")
+        print(f"\n  ⏱️  Next scan: {SCAN_INTERVAL}s...")
         time.sleep(SCAN_INTERVAL)
 
 if __name__ == "__main__":
