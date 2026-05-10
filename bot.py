@@ -73,6 +73,7 @@ BATCH_SIZE            = 7        # scan N simbol per cycle (28 simbol → 4 cycl
 SCAN_DELAY_MS         = 0.12     # detik jeda antar symbol API call (120ms = ~8 call/detik, aman di bawah limit)
 OHLCV_CACHE_TTL       = 55       # detik: cache OHLCV 15m selama 55 detik (1 candle = 60 detik)
 _ohlcv_cache          = {}       # {(symbol, interval): (timestamp_fetch, df)}
+_ohlcv_errors         = {}       # {(symbol, interval): error_msg} — dikumpul, ditampilkan di header
 _scan_batch_idx       = 0        # index batch saat ini (round-robin)
 
 # ── FIX 2: Adaptive volume spike ─────────────────────────────────────────────
@@ -221,12 +222,17 @@ def get_ohlcv(symbol, interval, limit=200):
             df[c] = df[c].astype(float)
         df["time"] = pd.to_numeric(df["time"])
         _ohlcv_cache[cache_key] = (now, df)
+        # Reset error counter kalau berhasil
+        _ohlcv_errors.pop(cache_key, None)
         return df
-    except:
-        # Kalau gagal fetch, kembalikan cache lama kalau ada (lebih baik dari None)
+    except Exception as e:
+        # Catat error untuk ditampilkan di header cycle (bukan di sini langsung)
+        # supaya tidak merusak urutan log
+        err_msg = str(e)[:80]
+        _ohlcv_errors[cache_key] = err_msg
+        # Kembalikan cache lama kalau ada (lebih baik dari None)
         if cache_key in _ohlcv_cache:
             _, df_old = _ohlcv_cache[cache_key]
-            print(f"  ⚠️  [{symbol}] Fetch gagal, pakai cache lama")
             return df_old
         return None
 
@@ -1282,6 +1288,15 @@ def run_bot():
         flash_dir, flash_pct = detect_flash_move()
         flash_info = f" ⚡{flash_dir.upper()}:{flash_pct:.2f}%" if flash_dir != "none" else ""
 
+        # Kumpulkan error fetch yang terjadi sejak cycle terakhir
+        # (diisi oleh get_ohlcv, bukan di-print langsung supaya log tidak berantakan)
+        fetch_errors = list(_ohlcv_errors.items())
+        _ohlcv_errors.clear()  # reset setelah ditampilkan
+
+        # FIX LOG: Semua print header dikumpulkan dulu, baru dicetak sekaligus
+        total_batches = math.ceil(len(symbols) / BATCH_SIZE)
+        next_batch_num = (_scan_batch_idx % total_batches) + 1  # batch yang akan di-scan cycle ini
+
         print(f"\n{'='*72}")
         print(f"  🔄 #{cycle} {time.strftime('%H:%M:%S')} | F&G:{_macro['fng']}({_macro['fng_label']}) | "
               f"USDT:{_macro['usdt_d']}% | News:{_macro['news']}(skor:{_macro['news_strength']}){cd_info}{flash_info}")
@@ -1289,11 +1304,18 @@ def run_bot():
         print(f"  🌍 Breadth:{_macro['market_breadth']*100:.0f}% | MCap24h:{_macro['global_mcap_chg']:+.1f}%")
         for h in _macro["headlines"]: print(f"  {h}")
         print(f"  📂 Posisi({len(open_positions)}): {list(open_positions.keys()) or '-'}")
-
-        # FIX 1: Tampilkan info batch
-        total_batches = math.ceil(len(symbols) / BATCH_SIZE)
-        print(f"  🔍 Scan batch {_scan_batch_idx + 1}/{total_batches} "
+        print(f"  🔍 Akan scan batch {next_batch_num}/{total_batches} "
               f"(full scan selesai tiap ~{total_batches} cycle ≈ {total_batches * SCAN_INTERVAL // 60}m)")
+
+        # Tampilkan error fetch dari cycle sebelumnya di sini (bukan di tengah scan)
+        if fetch_errors:
+            unique_syms = list(dict.fromkeys(k[0] for k, v in fetch_errors))
+            print(f"  ⚠️  Fetch gagal ({len(fetch_errors)}x): {', '.join(unique_syms[:5])}"
+                  + (f" +{len(unique_syms)-5} lagi" if len(unique_syms) > 5 else ""))
+            # Tampilkan 1 contoh error message untuk debug
+            first_key, first_err = fetch_errors[0]
+            print(f"     └─ Contoh error [{first_key[0]}]: {first_err}")
+
         print(f"{'='*72}")
 
         skipped    = 0
