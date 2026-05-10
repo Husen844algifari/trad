@@ -222,15 +222,18 @@ def get_ohlcv(symbol, interval, limit=200):
             df[c] = df[c].astype(float)
         df["time"] = pd.to_numeric(df["time"])
         _ohlcv_cache[cache_key] = (now, df)
-        # Reset error counter kalau berhasil
         _ohlcv_errors.pop(cache_key, None)
         return df
     except Exception as e:
-        # Catat error untuk ditampilkan di header cycle (bukan di sini langsung)
-        # supaya tidak merusak urutan log
         err_msg = str(e)[:80]
         _ohlcv_errors[cache_key] = err_msg
-        # Kembalikan cache lama kalau ada (lebih baik dari None)
+
+        # Auto-backoff: kalau IP banned (-1003), tunggu 65 detik sebelum lanjut
+        # supaya tidak terus-terusan retry dan memperpanjang ban
+        if "-1003" in err_msg:
+            print(f"\n  🚫 IP RATE LIMITED — tunggu 65 detik otomatis...")
+            time.sleep(65)
+
         if cache_key in _ohlcv_cache:
             _, df_old = _ohlcv_cache[cache_key]
             return df_old
@@ -388,22 +391,40 @@ def refresh_macro():
             _macro["last_news"]     = now
         except: pass
 
+    # BTC 15m: refresh tiap 60 detik (paling sering berubah)
     if now - _macro["last_btc"] > 60:
         try:
             df_15m = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_15MINUTE, 60)
-            df_1h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
-            df_4h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_4HOUR, 60)
             _macro["btc_trend_15m"] = _calc_btc_trend(df_15m)
-            _macro["btc_trend_1h"]  = _calc_btc_trend(df_1h)
-            _macro["btc_trend_4h"]  = _calc_btc_trend(df_4h)
             _macro["last_btc"]      = now
+        except: pass
+
+    # BTC 1H: refresh tiap 10 menit (tidak perlu tiap cycle)
+    if now - _macro.get("last_btc_1h", 0) > 600:
+        try:
+            time.sleep(0.15)
+            df_1h = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
+            _macro["btc_trend_1h"]  = _calc_btc_trend(df_1h)
+            _macro["last_btc_1h"]   = now
+        except: pass
+
+    # BTC 4H: refresh tiap 20 menit (paling jarang berubah)
+    if now - _macro.get("last_btc_4h", 0) > 1200:
+        try:
+            time.sleep(0.15)
+            df_4h = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_4HOUR, 60)
+            _macro["btc_trend_4h"]  = _calc_btc_trend(df_4h)
+            _macro["last_btc_4h"]   = now
         except: pass
 
     if now - _macro["last_breadth"] > 300:
         try:
             bullish = 0
-            sample  = SYMBOLS[:15]
+            # Kurangi sample dari 15 → 8 simbol untuk hemat API call
+            # Cukup representatif untuk breadth, tidak perlu 15 sekaligus
+            sample  = SYMBOLS[:8]
             for sym in sample:
+                time.sleep(0.15)   # throttle 150ms antar call supaya tidak burst
                 df = get_ohlcv(sym, Client.KLINE_INTERVAL_15MINUTE, 10)
                 if df is not None and len(df) >= 5:
                     c    = df["close"]
@@ -864,10 +885,40 @@ def should_enter(symbol, df):
         return None, 0, 0, 0, {"skip": "Sudah dianalisa candle ini"}
 
     df_closed = run_ta(df_closed)
+
+    # ── Filter murah dulu (tidak butuh API call tambahan) ─────
+    # Cek BTC multi-TF, breadth, regime sebelum lanjut ke API call mahal
+
+    # Deteksi arah sementara dari TA dasar (untuk early reject)
+    # Pakai MACD + EMA stack sebagai proxy cepat
+    _last_row = df_closed.iloc[-1]
+    _e9, _e21 = _last_row["ema9"], _last_row["ema21"]
+    _hist = _last_row["macd_hist"]
+    _pre_dir = "LONG" if (_e9 > _e21 and _hist > 0) else ("SHORT" if (_e9 < _e21 and _hist < 0) else "NONE")
+
+    if _pre_dir != "NONE":
+        # Cek BTC & breadth lebih awal sebelum fetch OB/funding
+        btc_pre_ok, btc_pre_reason = btc_multi_tf_ok_for(_pre_dir)
+        if not btc_pre_ok:
+            return None, 0, 0, 0, {"skip": btc_pre_reason}
+
+        if _pre_dir == "LONG" and breadth < MIN_MARKET_BREADTH:
+            return None, 0, 0, 0, {"skip": f"Market breadth rendah ({breadth*100:.0f}%)"}
+        if _pre_dir == "SHORT" and breadth > 0.65:
+            return None, 0, 0, 0, {"skip": f"Market breadth tinggi ({breadth*100:.0f}%), skip SHORT"}
+
+        if _pre_dir == "LONG" and regime == "BEAR":
+            return None, 0, 0, 0, {"skip": "Regime BEAR — tidak LONG"}
+        if _pre_dir == "SHORT" and regime == "BULL":
+            return None, 0, 0, 0, {"skip": "Regime BULL — tidak SHORT"}
+
+    # ── Baru fetch data mahal (OB + funding) ─────────────────
+    time.sleep(0.15)   # throttle sebelum 2 API call berikutnya
     ob_imb    = get_ob_imbalance(symbol)
     cum_d     = get_cum_delta(df_closed)
 
     # FIX 3: funding sekarang tuple (avg, trend)
+    time.sleep(0.15)
     funding_avg, funding_trend = get_funding(symbol)
 
     ta_dir, score, breakdown = calc_composite_score(
@@ -883,6 +934,8 @@ def should_enter(symbol, df):
     if mcap_bad and ta_dir == "LONG":
         return None, 0, 0, 0, {"skip": f"Global mcap turun {_macro['global_mcap_chg']:.1f}% — skip LONG"}
 
+    # Re-check BTC/breadth/regime dengan arah final dari composite score
+    # (early reject pakai proxy, ini konfirmasi dengan arah yang lebih akurat)
     btc_ok, btc_reason = btc_multi_tf_ok_for(ta_dir)
     if not btc_ok:
         return None, 0, 0, 0, {"skip": btc_reason}
