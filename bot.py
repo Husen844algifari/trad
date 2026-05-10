@@ -75,12 +75,12 @@ TRAIL_TRIGGER         = 0.003        # aktifkan trailing setelah profit 0.3%
 TRAIL_PCT             = 0.002        # trailing distance 0.2%
 
 # ── Score & Filter ───────────────────────────────────────────────────────────
-MIN_COMPOSITE_SCORE   = 55           # lebih rendah dari v9 (62) → lebih banyak entry
-MIN_5M_SIGNALS        = 2            # minimal sinyal konfirmasi di 5m
+MIN_COMPOSITE_SCORE   = 52           # sedikit lebih rendah lagi
+MIN_5M_SIGNALS        = 1            # cukup 1 sinyal 5m (dari 2) agar tidak terlalu ketat
 MIN_FNG               = 30           # toleransi lebih rendah
 MAX_FNG_LONG          = 88
 MIN_FNG_ANY           = 15
-MIN_MARKET_BREADTH    = 0.40
+MIN_MARKET_BREADTH    = 0.30         # diturunkan dari 0.40, dan hanya berlaku di TREND mode
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 SCAN_INTERVAL         = 30           # scan tiap 30 detik (v9: 60s)
@@ -292,14 +292,15 @@ def _calc_trend(df):
 def _detect_scalp_mode():
     """
     Pilih mode scalping berdasarkan kondisi market:
-    - TREND: BTC trending → cari momentum continuation (pullback to EMA)
-    - MEAN_REV: BTC sideways/ranging → cari BB bounce + RSI extreme
+    - TREND: BTC ada momentum (BULL/MILD_BULL/BEAR/MILD_BEAR) → cari EMA pullback
+    - MEAN_REV: BTC benar-benar SIDEWAYS di kedua TF → cari BB bounce
     """
     t15 = _macro["btc_trend_15m"]
     t1h = _macro["btc_trend_1h"]
-    if t1h in ("BULL", "BEAR") or t15 in ("BULL", "BEAR"):
-        return "TREND"
-    return "MEAN_REV"
+    # MEAN_REV hanya kalau 1H DAN 15m keduanya SIDEWAYS
+    if t1h == "SIDEWAYS" and t15 == "SIDEWAYS":
+        return "MEAN_REV"
+    return "TREND"
 
 def refresh_macro():
     now = time.time()
@@ -365,18 +366,30 @@ def refresh_macro():
 
     if now - _macro["last_breadth"] > 120:  # refresh lebih sering
         try:
-            bullish = 0
-            sample  = SYMBOLS[:15]
+            bullish  = 0
+            counted  = 0
+            sample   = SYMBOLS[:15]
             for sym in sample:
-                df = get_ohlcv(sym, Client.KLINE_INTERVAL_15MINUTE, 10)
-                if df is not None and len(df) >= 5:
+                df = get_ohlcv(sym, Client.KLINE_INTERVAL_15MINUTE, 30)
+                if df is not None and len(df) >= 10:
                     c    = df["close"]
                     ema9 = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
-                    if c.iloc[-1] > ema9 and df["close"].iloc[-1] > df["open"].iloc[-1]:
+                    counted += 1
+                    # Kondisi lebih longgar: cukup salah satu (close > ema9 OR candle hijau)
+                    if c.iloc[-1] > ema9 or df["close"].iloc[-1] > df["open"].iloc[-1]:
                         bullish += 1
-            _macro["market_breadth"] = bullish / len(sample)
-            _macro["last_breadth"]   = now
-        except: pass
+            if counted > 0:
+                _macro["market_breadth"] = bullish / counted
+            else:
+                # Fallback: kalau semua fetch gagal, pakai nilai netral 0.5
+                _macro["market_breadth"] = 0.5
+            _macro["last_breadth"] = now
+            print(f"  📊 Breadth update: {bullish}/{counted} = {_macro['market_breadth']*100:.0f}%")
+        except Exception as e:
+            # Breadth gagal → jangan biarkan 0 memblokir semua entry
+            if _macro["market_breadth"] == 0:
+                _macro["market_breadth"] = 0.5
+            print(f"  ⚠️  Breadth fetch error: {e}, pakai fallback {_macro['market_breadth']*100:.0f}%")
 
 # ════════════════════════════════════════════════════
 #  FLASH CRASH DETECTOR
@@ -606,10 +619,8 @@ def get_5m_entry_signals(symbol, direction):
 def check_mean_reversion_setup(df_15m, symbol):
     """
     Mode khusus untuk market sideways/ranging.
-    Cari: harga di BB lower → LONG | harga di BB upper → SHORT
-    Konfirmasi RSI extreme + volume spike.
-
-    Returns: (direction, score) atau (None, 0)
+    Cari: harga di/dekat BB lower → LONG | harga di/dekat BB upper → SHORT
+    Threshold dilonggarkan agar lebih sering trigger.
     """
     if df_15m is None or len(df_15m) < 30:
         return None, 0
@@ -617,28 +628,35 @@ def check_mean_reversion_setup(df_15m, symbol):
     last = df_15m.iloc[-1]
     prev = df_15m.iloc[-2]
 
-    bb_lo = last["bb_lo"]
-    bb_hi = last["bb_hi"]
+    bb_lo  = last["bb_lo"]
+    bb_hi  = last["bb_hi"]
     bb_mid = last["bb_mid"]
     price  = last["close"]
     rsi    = last["rsi"]
+    bb_pct = (price - bb_lo) / (bb_hi - bb_lo) if (bb_hi - bb_lo) > 0 else 0.5
 
-    # Setup LONG: harga di bawah/di BB lower, RSI oversold, volume naik
-    if price <= bb_lo * 1.003 and rsi < 38:
-        score = 60
-        if last["vol_ratio"] > 1.2: score += 10
-        if last["stk"] < 25 and last["stk"] > last["std"]: score += 10
-        if last["close"] > last["open"]: score += 10  # candle reversal
-        if prev["close"] < prev["open"] and last["close"] > last["open"]: score += 10  # reversal candle
+    # Setup LONG: harga di bawah 30% BB (tidak harus tepat di lower band)
+    # RSI < 45 (longgar dari sebelumnya 38)
+    if bb_pct <= 0.30 and rsi < 45:
+        score = 55
+        if bb_pct <= 0.15: score += 10           # makin dekat lower → lebih kuat
+        if rsi < 35:       score += 10           # makin oversold → lebih kuat
+        if last["vol_ratio"] > 1.1: score += 10
+        if last["stk"] < 30 and last["stk"] > last["std"]: score += 10
+        if last["close"] > last["open"]: score += 5   # candle reversal
+        if prev["close"] < prev["open"] and last["close"] > last["open"]: score += 5
         return "LONG", min(score, 100)
 
-    # Setup SHORT: harga di atas/di BB upper, RSI overbought, volume naik
-    if price >= bb_hi * 0.997 and rsi > 62:
-        score = 60
-        if last["vol_ratio"] > 1.2: score += 10
-        if last["stk"] > 75 and last["stk"] < last["std"]: score += 10
-        if last["close"] < last["open"]: score += 10  # candle reversal
-        if prev["close"] > prev["open"] and last["close"] < last["open"]: score += 10
+    # Setup SHORT: harga di atas 70% BB
+    # RSI > 55 (longgar dari sebelumnya 62)
+    if bb_pct >= 0.70 and rsi > 55:
+        score = 55
+        if bb_pct >= 0.85: score += 10
+        if rsi > 65:       score += 10
+        if last["vol_ratio"] > 1.1: score += 10
+        if last["stk"] > 70 and last["stk"] < last["std"]: score += 10
+        if last["close"] < last["open"]: score += 5
+        if prev["close"] > prev["open"] and last["close"] < last["open"]: score += 5
         return "SHORT", min(score, 100)
 
     return None, 0
@@ -649,42 +667,53 @@ def check_mean_reversion_setup(df_15m, symbol):
 def check_trend_pullback_setup(df_15m, bias_direction):
     """
     Mode untuk market trending.
-    Cari: pullback ke EMA9/EMA21 searah bias.
-    Entry setelah candle reversal + volume konfirmasi.
-
-    Returns: (direction, score) atau (None, 0)
+    Dua kondisi entry:
+    A) Pullback dekat EMA9/EMA21 (dalam 0.8%) → entry setelah bounce
+    B) Trend continuation: harga di sisi benar EMA dengan volume & candle arah
     """
     if df_15m is None or len(df_15m) < 30:
         return None, 0
 
     last = df_15m.iloc[-1]
-    prev = df_15m.iloc[-2]
     price = last["close"]
     e9    = last["ema9"]
     e21   = last["ema21"]
+    e50   = last["ema50"]
 
     if bias_direction == "LONG":
-        # Pullback ke EMA9 atau EMA21 → entry LONG
-        touch_ema9  = abs(price - e9)  / price < 0.003
-        touch_ema21 = abs(price - e21) / price < 0.003
-        if (touch_ema9 or touch_ema21) and price > e21:
+        # Kondisi A: Pullback dekat EMA (dalam 0.8%)
+        touch_ema9  = abs(price - e9)  / price < 0.008
+        touch_ema21 = abs(price - e21) / price < 0.008
+        if (touch_ema9 or touch_ema21) and price > e50:
             score = 60
-            if last["rsi"] < 55:           score += 10
-            if last["vol_ratio"] > 1.1:    score += 10
-            if last["close"] > last["open"]: score += 10  # bounce confirmed
-            if e9 > e21:                   score += 10   # EMA masih bullish
+            if last["rsi"] < 58:             score += 10
+            if last["vol_ratio"] > 1.0:      score += 10
+            if last["close"] > last["open"]: score += 10
+            if e9 > e21:                     score += 10
+            return "LONG", min(score, 100)
+        # Kondisi B: Trend continuation (harga di atas EMA9 yang di atas EMA21)
+        if price > e9 > e21 and last["vol_ratio"] > 1.1 and last["close"] > last["open"]:
+            score = 62
+            if last["rsi"] < 65:        score += 10
+            if last["macd_hist"] > 0:   score += 10
             return "LONG", min(score, 100)
 
     elif bias_direction == "SHORT":
-        # Pullback ke EMA9 atau EMA21 → entry SHORT
-        touch_ema9  = abs(price - e9)  / price < 0.003
-        touch_ema21 = abs(price - e21) / price < 0.003
-        if (touch_ema9 or touch_ema21) and price < e21:
+        # Kondisi A: Pullback dekat EMA (dalam 0.8%)
+        touch_ema9  = abs(price - e9)  / price < 0.008
+        touch_ema21 = abs(price - e21) / price < 0.008
+        if (touch_ema9 or touch_ema21) and price < e50:
             score = 60
-            if last["rsi"] > 45:           score += 10
-            if last["vol_ratio"] > 1.1:    score += 10
-            if last["close"] < last["open"]: score += 10  # rejection confirmed
-            if e9 < e21:                   score += 10   # EMA masih bearish
+            if last["rsi"] > 42:             score += 10
+            if last["vol_ratio"] > 1.0:      score += 10
+            if last["close"] < last["open"]: score += 10
+            if e9 < e21:                     score += 10
+            return "SHORT", min(score, 100)
+        # Kondisi B: Trend continuation
+        if price < e9 < e21 and last["vol_ratio"] > 1.1 and last["close"] < last["open"]:
+            score = 62
+            if last["rsi"] > 35:        score += 10
+            if last["macd_hist"] < 0:   score += 10
             return "SHORT", min(score, 100)
 
     return None, 0
@@ -924,9 +953,16 @@ def should_enter(symbol, df_15m):
 
     # ── STEP 2: 1H Bias ──────────────────────────────────────
     bias_dir, bias_conf = get_1h_bias(symbol)
-    if bias_dir == "NONE" and _macro["scalp_mode"] == "TREND":
-        # Di mode trend, kalau 1H tidak jelas → skip
-        return None, 0, 0, 0, {"skip": f"1H bias tidak jelas (conf:{bias_conf:.0f}%)"}
+    # Kalau 1H bias NONE tapi BTC macro punya arah jelas, gunakan BTC trend sebagai fallback
+    if bias_dir == "NONE":
+        btc_15m = _macro["btc_trend_15m"]
+        btc_1h  = _macro["btc_trend_1h"]
+        if btc_1h in BULL_TRENDS or btc_15m == "BULL":
+            bias_dir, bias_conf = "LONG", 50
+        elif btc_1h in BEAR_TRENDS or btc_15m == "BEAR":
+            bias_dir, bias_conf = "SHORT", 50
+        elif _macro["scalp_mode"] == "TREND":
+            return None, 0, 0, 0, {"skip": f"1H bias tidak jelas (conf:{bias_conf:.0f}%) & BTC neutral"}
 
     # ── STEP 3: 15m setup ────────────────────────────────────
     prev_candle_time = int(df_15m["time"].iloc[-2])
@@ -955,17 +991,7 @@ def should_enter(symbol, df_15m):
             return None, 0, 0, 0, {"skip": "Trend mode tapi bias tidak jelas"}
         direction, mode_score = check_trend_pullback_setup(df_closed, bias_dir)
         if direction is None:
-            # Fallback: kalau tidak ada pullback, cek apakah ada momentum breakout
-            # (harga baru saja melewati EMA21 dengan volume)
-            last = df_closed.iloc[-1]
-            e21  = last["ema21"]
-            price = last["close"]
-            if bias_dir == "LONG" and price > e21 and last["vol_ratio"] > 1.3:
-                direction, mode_score = "LONG", 65
-            elif bias_dir == "SHORT" and price < e21 and last["vol_ratio"] > 1.3:
-                direction, mode_score = "SHORT", 65
-            else:
-                return None, 0, 0, 0, {"skip": f"Trend mode: tidak ada EMA pullback ({bias_dir})"}
+            return None, 0, 0, 0, {"skip": f"Trend mode: tidak ada setup valid ({bias_dir})"}
 
     # Validasi direction vs macro
     btc_t1h = _macro["btc_trend_1h"]
@@ -975,8 +1001,9 @@ def should_enter(symbol, df_15m):
             return None, 0, 0, 0, {"skip": f"BTC 4H={btc_t4h} BEAR — skip LONG"}
         if fng > MAX_FNG_LONG:
             return None, 0, 0, 0, {"skip": f"F&G terlalu greedy ({fng})"}
-        if _macro["market_breadth"] < MIN_MARKET_BREADTH:
-            return None, 0, 0, 0, {"skip": f"Breadth rendah ({_macro['market_breadth']*100:.0f}%)"}
+        # Breadth filter HANYA untuk TREND mode, MEAN_REV justru bagus saat breadth rendah
+        if scalp_mode == "TREND" and _macro["market_breadth"] < MIN_MARKET_BREADTH:
+            return None, 0, 0, 0, {"skip": f"Breadth rendah ({_macro['market_breadth']*100:.0f}%) — Trend mode skip"}
     elif direction == "SHORT":
         if btc_t4h in BULL_TRENDS and btc_t1h in BULL_TRENDS:
             return None, 0, 0, 0, {"skip": f"BTC 4H+1H BULL — skip SHORT"}
