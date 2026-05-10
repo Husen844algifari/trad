@@ -1,50 +1,71 @@
 """
-Bot Scalping v10 FIXED — 1H Bias + 15m/5m Entry
-================================================
+Bot Scalping v13 — ULTRA LIGHTNING ⚡⚡⚡
+==========================================
 
-PERBAIKAN UTAMA vs v10 ORIGINAL:
-  1. [FIX] Score normalisasi: max_possible = sum(W.values()) bukan *1.5
-  2. [FIX] Toleransi pullback EMA: 0.8% → 2.5% (lebih realistis)
-  3. [FIX] MIN_COMPOSITE_SCORE: 52 → 38 (bot sebelumnya tidak pernah entry)
-  4. [FIX] Tambah kondisi "Full Bull Stack" & "Full Bear Stack" di trend mode
-  5. [FIX] RSI bounce threshold: 40 → 45 (lebih sering trigger)
-  6. [FIX] MIN_5M_SIGNALS: dikurangi, cukup 0 sinyal jika mode_score >= 70
-  7. [FIX] check_trend_pullback_setup: tambah kondisi harga jauh dari EMA tapi
-           masih in-trend (sebelumnya hanya cek pullback/touch)
-  8. [FIX] 1H Bias: threshold diturunkan dari 55% → 48% agar lebih banyak
-           simbol mendapat bias direction
-  9. [NEW] 100 simbol top Binance Futures
-  10.[FIX] BATCH_SIZE 5→8, SCAN_INTERVAL 30→40s agar tidak rate-limit
-  11.[FIX] Breadth fallback 0.5 lebih agresif agar tidak block entry
-  12.[FIX] Volume spike threshold BASE_VOL_SPIKE: 1.3 → 1.1
+FILOSOFI v13:
+  ⚡ "MINUS SATU ANGKA → CUT. PROFIT SATU ANGKA → TRAIL DARI SANA. TIDAK ADA KOMPROMI."
 
-ARSITEKTUR SCALPING:
-  ┌─────────────┐
-  │  1H Candle  │  → Tentukan BIAS (BULL / BEAR / SIDEWAYS)
-  │  (Filter)   │    → Hanya LONG kalau 1H BULL, SHORT kalau 1H BEAR
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │ 15m Candle  │  → Konfirmasi SETUP (RSI, MACD, EMA Stack, Volume)
-  │  (Setup)    │    → Score ≥ MIN_SCORE → lanjut ke 5m
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │  5m Candle  │  → TRIGGER ENTRY (breakout mini, engulfing, RSI bounce)
-  │  (Entry)    │    → Entry instan kalau ≥ MIN_5M_SIGNALS sinyal confirm
-  └─────────────┘
+  PERUBAHAN UTAMA dari v12:
+  ─────────────────────────
+  🔴 ZERO-LOSS TOLERANCE: minus 1 tick (0.01%) → CUT SEKETIKA, tanpa basa-basi
+  🟢 INSTANT TRAIL FROM PROFIT: profit 1 tick → trailing stop langsung pasang di entry price
+  📈 DYNAMIC TRAIL FOLLOW: trail naik mengikuti harga, TIDAK diam di entry
+  🔄 PRE-SCAN PARALEL: selalu ada 5 kandidat siap dalam antrian (tidak pernah kosong)
+  🚀 MAX 3 POSISI: fokus kualitas, bukan kuantitas
+  📊 LAPORAN LENGKAP: setiap close tampil detail (profit/loss, TP count, trailing berapa kali)
+  ⚡ MONITOR 1 DETIK: posisi dicek setiap 1 detik untuk respons ultra-cepat
+  🎯 PRE-WARM CANDIDATES: background scan terus-menerus, kandidat selalu fresh
 
-SCALPING SETTINGS:
-  - Target TP1: 0.8% (cepat ambil profit)
-  - Target TP2: 1.5% (trailing)
-  - SL: 0.5-0.8% max (tight stop)
-  - Leverage: 15x
-  - Holding time ideal: 5-20 menit per trade
-  - Scan interval: 40 detik
+  FIX v13.1:
+  ──────────
+  🐛 FIX: get_best_candidate() TTL naik dari 12s → 45s (kandidat tidak expire sebelum dipakai)
+  🐛 FIX: pre_scan_engine() staleness check naik dari 10s → 40s (konsisten dengan TTL)
+  🐛 FIX: PRE_SCAN_INTERVAL turun dari 8s → 5s (lebih sering isi queue)
+  🐛 FIX: re-validasi harga sebelum open_trade() — skip jika drift >0.3%
+
+ARSITEKTUR v13:
+  ┌─────────────────────────────────────────────────────────┐
+  │  PRE-SCAN ENGINE (background, parallel 25 threads)      │
+  │  Selalu maintain 5 kandidat terbaik di antrian          │
+  │  Re-scan setiap 5 detik, prioritas hot symbols          │
+  └───────────────────┬─────────────────────────────────────┘
+                      │
+  ┌───────────────────▼─────────────────────────────────────┐
+  │  ULTRA-FAST POSITION MONITOR (1 detik interval)         │
+  │  Tick resolution: deteksi pergerakan per-tick           │
+  │  Zero-loss: minus 0.01% → cut dalam <2 detik           │
+  │  Instant trail: profit 0.01% → trail aktif di entry    │
+  │  Dynamic trail: makin profit → trail makin ketat        │
+  └───────────────────┬─────────────────────────────────────┘
+                      │
+  ┌───────────────────▼─────────────────────────────────────┐
+  │  CLOSE ENGINE + LAPORAN DETAIL                          │
+  │  Setiap close: tampilkan ringkasan lengkap              │
+  │  Trail count, TP hits, holding time, PnL realtime       │
+  │  Langsung ambil kandidat dari antrian → entry baru      │
+  └─────────────────────────────────────────────────────────┘
+
+PROFIT FLOW v13:
+  Entry @ 100
+  ├─ Minus 0.01%? (99.99) → CUT SEKARANG ─────────────────── [LOSS]
+  ├─ Profit 0.01%? (100.01) → Trail aktif di entry (100.00)
+  │   ├─ Naik ke 100.10 → Trail naik ke 100.00 (masih di entry)
+  │   ├─ Naik ke 100.30 → Trail naik ke 100.24 (trail 0.06%)
+  │   ├─ Naik ke 100.50 → Trail naik ke 100.46 (trail 0.04%)
+  │   └─ Naik ke 100.60 → Trail naik ke 100.57 (trail 0.03% super ketat)
+  └─ TP1 @ 100.35% → Close 60% + trail 40% sisa
+
+TRAIL MECHANICS:
+  Profit 0.01-0.30%: Trail di ENTRY PRICE (zero-loss guarantee)
+  Profit 0.30-0.50%: Trail mengikuti 0.06% di bawah peak
+  Profit 0.50-0.80%: Trail mengikuti 0.04% di bawah peak
+  Profit 0.80%+:     Trail mengikuti 0.03% di bawah peak (super ketat)
 """
 
-import os, time, math, json, requests
-from collections import deque
+import os, time, math, json, threading, queue
+import requests
+from collections import deque, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.enums import *
@@ -54,236 +75,281 @@ import numpy as np
 
 load_dotenv()
 client = Client(os.getenv("API_KEY"), os.getenv("API_SECRET"))
-# Hapus baris berikut untuk akun REAL:
-client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+
+# ══════════════════════════════════════════════════════════
+# TESTNET / REAL — pilih salah satu
+
+# Untuk real: comment baris atas
+# ══════════════════════════════════════════════════════════
+
 
 # ════════════════════════════════════════════════════
-#  CONFIG SCALPING
+#  ██╗   ██╗ ██╗██████╗     ███████╗███████╗████████╗
+#  ██║   ██║███║╚════╝╚═╗   ██╔════╝██╔════╝╚══██╔══╝
+#  ██║   ██║╚██║ █████╗  ║   ███████╗█████╗     ██║
+#  ╚██╗ ██╔╝ ██║ ╚═══██╗ ║   ╚════██║██╔══╝     ██║
+#   ╚████╔╝  ██║██████╔╝ ║   ███████║███████╗   ██║
+#    ╚═══╝   ╚═╝╚═════╝ ╝   ╚══════╝╚══════╝   ╚═╝
+#  ULTRA LIGHTNING MODE
 # ════════════════════════════════════════════════════
-LEVERAGE              = 15
-ORDER_USDT            = 50
-MAX_POSITIONS         = 3
 
-# ── TP/SL ────────────────────────────────────────────────────────────────────
-ATR_SL_MULT           = 1.2
-ATR_TP1_MULT          = 1.0
-ATR_TP2_MULT          = 2.0
-MAX_SL_PCT            = 0.010        # [FIX] naikkan dari 0.008 → 0.010 agar ATR besar tidak selalu skip
-MIN_RR                = 1.0          # [FIX] turunkan dari 1.2 → 1.0 agar tidak terlalu ketat
+# ── CORE SETTINGS ────────────────────────────────────────────────
+LEVERAGE              = 20
+ORDER_USDT            = 1           # $10 per trade
+MAX_POSITIONS         = 1            # ✅ MAX 3 POSISI (fokus kualitas!)
+PRE_SCAN_CANDIDATES   = 5            # selalu siapkan 5 kandidat di antrian
 
-# ── Trailing ─────────────────────────────────────────────────────────────────
-TRAIL_TRIGGER         = 0.003
-TRAIL_PCT             = 0.002
+# ── ZERO-LOSS TOLERANCE (FITUR BARU v13) ─────────────────────────
+# Minus satu angka (tick) → CUT SEKETIKA
+ZERO_LOSS_TICK_PCT    = 0.0001       # 0.01% = ~1 tick, kalau minus ini langsung cut
+# Berapa detik window zero-loss aktif (semua waktu, bukan hanya 2 candle)
+ZERO_LOSS_ALWAYS      = True         # ✅ aktif SELAMANYA, bukan hanya awal
 
-# ── Score & Filter ── [FIX UTAMA] ────────────────────────────────────────────
-MIN_COMPOSITE_SCORE   = 38           # [FIX] dari 52 → 38
-MIN_5M_SIGNALS        = 0            # [FIX] dari 1 → 0, mode_score tinggi cukup
-MIN_5M_SIGNALS_STRICT = 1            # kalau mode_score < 70, butuh minimal ini
-MIN_FNG               = 20           # [FIX] dari 30 → 20
-MAX_FNG_LONG          = 90           # [FIX] dari 88 → 90
-MIN_FNG_ANY           = 12           # [FIX] dari 15 → 12
-MIN_MARKET_BREADTH    = 0.25         # [FIX] dari 0.30 → 0.25
+# ── INSTANT TRAIL FROM PROFIT (FITUR BARU v13) ───────────────────
+# Profit 1 tick → trailing stop LANGSUNG pasang di entry (zero-loss lock)
+PROFIT_TRIGGER_TRAIL  = 0.0001       # 0.01% profit → trail aktif
+TRAIL_ANCHOR_ENTRY    = True         # ✅ trail awal = di ENTRY PRICE (bukan lebih rendah)
 
-# ── Timing ───────────────────────────────────────────────────────────────────
-SCAN_INTERVAL         = 40           # [FIX] dari 30 → 40 (hindari rate limit dengan 100 simbol)
-BATCH_SIZE            = 8            # [FIX] dari 5 → 8
-SCAN_DELAY_MS         = 0.10         # 100ms antar call
-OHLCV_CACHE_TTL_5M    = 25
-OHLCV_CACHE_TTL_15M   = 55
-OHLCV_CACHE_TTL_1H    = 3500
+# Dynamic trail: makin profit → makin ketat
+# Format: (profit_pct_threshold, trail_distance_pct)
+TRAIL_PHASES = [
+    (0.0000, 0.0000),   # 0.00-0.01% profit: trail TEPAT di entry (zero loss)
+    (0.0001, 0.0000),   # 0.01-0.30% profit: trail DI entry price
+    (0.0030, 0.0006),   # 0.30-0.50% profit: trail 0.06% di bawah peak
+    (0.0050, 0.0004),   # 0.50-0.80% profit: trail 0.04% di bawah peak
+    (0.0080, 0.0003),   # 0.80%+ profit:     trail 0.03% (ultra ketat)
+]
 
-# ── Misc ─────────────────────────────────────────────────────────────────────
-SR_BUFFER             = 0.004        # [FIX] dari 0.005 → 0.004
-USDT_RISK_OFF_DELTA   = 0.03
-MAX_CONSEC_LOSS       = 3
-MAX_HOLDING_MINUTES   = 45
-FLASH_CRASH_PCT       = 1.0
-FLASH_PUMP_PCT        = 1.0
-FLASH_WINDOW_SEC      = 300
+# ── PROFIT TARGETS ───────────────────────────────────────────────
+TP1_PCT               = 0.0035       # 0.35% → partial close 60%
+TP2_PCT               = 0.0060       # 0.60% → target penuh
+SL_PCT                = 0.0020       # 0.20% hard SL (backup dari zero-loss)
 
-# ── Funding ──────────────────────────────────────────────────────────────────
-FUNDING_LOOKBACK      = 3
-FUNDING_THRESHOLD     = 0.07
+TP1_CLOSE_RATIO       = 0.60         # 60% close di TP1
+TP2_CLOSE_RATIO       = 0.40         # sisa trailing ke TP2
 
-# ── Adaptive Volume ── [FIX] ─────────────────────────────────────────────────
-BASE_VOL_SPIKE        = 1.1          # [FIX] dari 1.3 → 1.1 (lebih sensitif)
-ATR_VOL_SCALE         = 1.5
-VOL_SPIKE_MIN_CANDLES = 1
+# ── KECEPATAN v13 ─────────────────────────────────────────────────
+SCAN_INTERVAL         = 10           # main loop scan tiap 10 detik
+POSITION_MONITOR_SEC  = 1            # ✅ monitor posisi tiap 1 DETIK (ultra fast!)
+PRE_SCAN_INTERVAL     = 5            # 🔧 FIX: background pre-scan tiap 5 detik (dari 8)
+SCAN_DELAY_MS         = 0.020        # 20ms antar API call (lebih cepat)
+BATCH_SIZE            = 25           # 25 symbol per batch
+MAX_HOLDING_MIN       = 6            # force close setelah 6 menit
+SYMBOL_COOLDOWN_SEC   = 20           # cooldown 20 detik setelah close
+RE_SCAN_DELAY_SEC     = 0.3          # delay 0.3 detik setelah close
 
-# ── 1H Bias threshold ── [FIX] ───────────────────────────────────────────────
-BIAS_THRESHOLD        = 48           # [FIX] dari 55 → 48 (lebih banyak simbol dapat bias)
-BIAS_MARGIN           = 8            # [FIX] dari 10 → 8
+# ── CANDIDATE TTL ─────────────────────────────────────────────────
+# 🔧 FIX: TTL kandidat — naik supaya tidak expire sebelum dipakai main loop
+CANDIDATE_TTL_VALID   = 45           # detik: kandidat dianggap valid untuk entry
+CANDIDATE_TTL_PRESCAN = 40           # detik: staleness check di pre_scan_engine
+CANDIDATE_TTL_STALE   = 60           # detik: hapus dari cache sama sekali
 
-# ── EMA Pullback Tolerance ── [FIX] ──────────────────────────────────────────
-EMA_TOUCH_PCT         = 0.025        # [FIX] dari 0.008 → 0.025 (2.5%)
+# ── PRICE DRIFT GUARD ─────────────────────────────────────────────
+# 🔧 FIX: re-validasi harga sebelum open_trade, skip jika harga sudah gerak jauh
+PRICE_DRIFT_MAX_PCT   = 0.003        # 0.3% — kalau harga sudah drift, skip kandidat
 
-# ── Smart Cooldown ───────────────────────────────────────────────────────────
-COOLDOWN_BTC_BAD      = {"BEAR"}
-COOLDOWN_BREADTH_MAX  = 0.35
-COOLDOWN_BTC_RECOVER  = {"BULL", "MILD_BULL", "SIDEWAYS"}
-COOLDOWN_BREADTH_MIN  = 0.40        # [FIX] dari 0.45 → 0.40
+# ── CACHE ─────────────────────────────────────────────────────────
+OHLCV_CACHE_TTL_5M    = 5
+OHLCV_CACHE_TTL_15M   = 40
+OHLCV_CACHE_TTL_1H    = 1800
 
-# ════════════════════════════════════════════════════
-#  100 TOP SYMBOLS BINANCE FUTURES [NEW]
-# ════════════════════════════════════════════════════
+# ── FILTER ────────────────────────────────────────────────────────
+MIN_SCORE_TREND       = 50
+MIN_SCORE_MEANREV     = 60
+MIN_ENTRY_SIGNALS     = 2
+MIN_VOL_SPIKE         = 1.2
+MIN_FNG               = 20
+MAX_FNG_LONG          = 90
+MIN_BREADTH           = 0.28
+MAX_SL_PCT            = 0.004
+
+# ── SYMBOLS ──────────────────────────────────────────────────────
 SYMBOLS = [
-    # Mega cap
+    # ── Tier 1 — Mega Cap ─────────────────────────────────────────
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    # Large cap
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+
+    # ── Tier 2 — Large Cap ────────────────────────────────────────
     "MATICUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "ETCUSDT",
     "NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT",
     "SUIUSDT", "TIAUSDT", "AAVEUSDT", "RUNEUSDT", "FILUSDT",
-    "1000PEPEUSDT", "WIFUSDT", "JUPUSDT",
-    # Mid cap - DeFi & Layer 1
-    "STXUSDT", "SEIUSDT", "FLOWUSDT", "GALAUSDT", "SANDUSDT",
-    "MANAUSDT", "APEUSDT", "GMXUSDT", "DYDXUSDT", "CRVUSDT",
-    "LDOUSDT", "RNDRUSDT", "FETUSDT", "AGIXUSDT", "OCEANUSDT",
-    "BLURUSDT", "JTOUSDT", "PYTHUSDT", "WUSDT", "STRKUSDT",
-    # Gaming & NFT
-    "AXSUSDT", "IMXUSDT", "GRTUSDT", "ENSUSDT", "ILVUSDT",
-    "YGGUSDT", "ROSEUSDT", "SKLUSDT", "CELRUSDT", "LRCUSDT",
-    # BTC ecosystem & Meme
-    "ORDIUSDT", "1000BONKUSDT", "1000FLOKIUSDT", "MEMEUSDT",
-    "BOMEUSDT", "TURBOUSDT", "NEIROUSDT",
-    # AI & Data
-    "WLDUSDT", "TAOUSDT", "ARKMUSDT", "ZETAUSDT", "DYMUSDT",
-    "ONDOUSDT", "ETHFIUSDT", "AIUSDT",
-    # Misc high-volume
-    "HBARUSDT", "ALGOUSDT", "XLMUSDT", "VETUSDT", "ICPUSDT",
-    "CFXUSDT", "TONUSDT", "NOTUSDT",
-    # Exchange tokens & Ecosystem
-    "MKRUSDT", "SNXUSDT", "COMPUSDT", "BALUSDT", "SUSHIUSDT",
-    "1INCHUSDT", "YFIUSDT", "BANDUSDT",
-    # Additional Layer 1 / Layer 2
-    "MANTAUSDT", "ALTUSDT", "EIGENUSDT", "RONINUSDT",
-    "PIXELUSDT", "ACEUSDT",
-    # Perp high OI
-    "KDAUSDT", "ZENUSDT", "ZILUSDT", "IOTAUSDT",
-    "ONTUSDT", "COTIUSDT", "STORJUSDT", "SXPUSDT",
-    # Newer listings with decent volume
-    "ENAUSDT", "PEOPLEUSDT", "BBUSDT", "IOtusdt",
+    "STXUSDT", "TONUSDT", "ICPUSDT", "HBARUSDT", "FLOWUSDT",
+
+    # ── Tier 3 — Mid Cap ──────────────────────────────────────────
+    "1000PEPEUSDT", "WIFUSDT", "JUPUSDT", "SEIUSDT", "PYTHUSDT",
+    "FETUSDT", "RENDERUSDT", "WLDUSDT", "STRKUSDT", "ALTUSDT",
+    "DYMUSDT", "MANTAUSDT", "ZETAUSDT", "RONINUSDT", "NOTUSDT",
+    "EIGENUSDT", "CATIUSDT", "1000BONKUSDT", "MOVEUSDT", "MEUSDT",
+
+    # ── DeFi ──────────────────────────────────────────────────────
+    "CRVUSDT", "MKRUSDT", "COMPUSDT", "SUSHIUSDT", "SNXUSDT",
+    "1INCHUSDT", "BALUSDT", "DYDXUSDT", "GMXUSDT", "PENDLEUSDT",
+    "JTOUSDT", "RAYUSDT", "RDNTUSDT", "LQTYUSDT", "ANKRUSDT",
+
+    # ── L1 / L2 ───────────────────────────────────────────────────
+    "ALGOUSDT", "FTMUSDT", "EGLDUSDT", "THETAUSDT", "KSMUSDT",
+    "KAVAUSDT", "BANDUSDT", "COTIUSDT", "SKLUSDT", "CELRUSDT",
+    "CTSIUSDT", "IOTAUSDT", "ONEUSDT", "ZILUSDT", "ONTUSDT",
+
+    # ── Gaming / NFT / Metaverse ──────────────────────────────────
+    "AXSUSDT", "SANDUSDT", "MANAUSDT", "ENJUSDT", "GALAUSDT",
+    "IMXUSDT", "BLURUSDT", "MASKUSDT", "HIGHUSDT", "BEAMXUSDT",
+    "MEMEUSDT", "ORDIUSDT", "YGGUSDT", "SLPUSDT", "WAXPUSDT",
+
+    # ── Infrastructure / Data / AI ────────────────────────────────
+    "ARUSDT", "OCEANUSDT", "GRTUSDT", "AGIXUSDT", "NMRUSDT",
+    "CTXCUSDT", "POLYXUSDT", "TRUUSDT", "BLZUSDT", "SXPUSDT",
+    "VIDTUSDT", "DUSKUSDT", "MDTUSDT", "REQUSDT", "POWRUSDT",
+
+    # ── Meme / Viral ──────────────────────────────────────────────
+    "SHIBUSDT", "FLOKIUSDT", "BONKUSDT", "JASMYUSDT", "LUNCUSDT",
+    "CFXUSDT", "COMBOUSDT", "AGLDUSDT", "IDUSDT", "GASUSDT",
+    "1000RATSUSDT", "1000SATSUSDT", "TURBOUSDT", "BOMEUSDT", "POPCATUSDT",
+
+    # ── Exchange / CeFi ───────────────────────────────────────────
+    "CAKEUSDT", "GMTUSDT", "ACHUSDT", "HOOKUSDT", "MAGICUSDT",
+    "HFTUSDT", "CYBERUSDT", "ARKUSDT", "PIVXUSDT", "STEEMUSDT",
+
+    # ── Cross-chain / Bridge / Oracle ─────────────────────────────
+    "API3USDT", "UMAUSDT", "BANDUSDT", "DIAUSDT", "OXTUSDT",
+    "STMXUSDT", "IDEXUSDT", "BADGERUSDT", "ALPACAUSDT", "BNTUSDT",
+
+    # ── Misc High-Volume ──────────────────────────────────────────
+    "VETUSDT", "XTZUSDT", "NEOUSDT", "DASHUSDT", "ZECUSDT",
+    "WAVESUSDT", "IOSTUSDT", "STORJUSDT", "CVCUSDT", "OGNUSDT",
 ]
 
-# ── Composite score weights ───────────────────────────────────────────────────
-SCORE_WEIGHTS = {
-    "macd_hist":    16,
-    "rsi":          14,
-    "ema_stack":    14,   # [FIX] naikkan dari 12 → 14
-    "volume":       10,   # [FIX] turunkan dari 12 → 10
-    "ob_imbalance":  8,   # [FIX] turunkan dari 10 → 8
-    "cum_delta":     6,   # [FIX] turunkan dari 8 → 6
-    "stoch":         8,
-    "bb":            8,
-    "funding":       4,
-    "momentum_5m":  12,   # [FIX] naikkan dari 8 → 12 (lebih dominan)
-}
-# Total weights = 100 → max_possible = 100 (tidak di-*1.5 lagi) ← FIX UTAMA
+# ════════════════════════════════════════════════════
+#  STATE GLOBAL
+# ════════════════════════════════════════════════════
+open_positions      = {}
+trade_log           = []
+_ohlcv_cache        = {}
+_sym_info           = {}
+_sym_cooldown       = {}
+_btc_price_history  = deque(maxlen=300)
+_scan_batch_idx     = 0
+_lock               = threading.Lock()
+_executor           = ThreadPoolExecutor(max_workers=25)
 
-# ════════════════════════════════════════════════════
-#  STATE
-# ════════════════════════════════════════════════════
-open_positions     = {}
-trade_log          = []
-_last_candle       = {}
-_consec_loss       = 0
-_in_cooldown       = False
-_scan_batch_idx    = 0
-_ohlcv_cache       = {}
-_btc_price_history = deque(maxlen=100)
-_sym_info          = {}
+# Pre-scan candidate queue — selalu terisi, siap pakai
+_candidate_queue    = queue.PriorityQueue()  # (−score, symbol, direction, info)
+_candidate_lock     = threading.Lock()
+_candidate_cache    = {}   # symbol → (ts, direction, info) untuk deduplikasi
+
+# Event queue untuk trigger re-scan instan setelah close
+_rescan_queue       = queue.Queue()
+_hot_symbols        = deque(maxlen=20)
+
+_macro = {
+    "fng": 50, "fng_label": "Neutral",
+    "btc_trend_5m": "UNKNOWN",
+    "btc_trend_15m": "UNKNOWN",
+    "btc_trend_1h": "UNKNOWN",
+    "market_breadth": 0.5,
+    "news": "neutral",
+    "scalp_mode": "TREND",
+    "last_fng": 0, "last_btc": 0, "last_breadth": 0, "last_news": 0,
+}
+
+_stats = {
+    "total_trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "total_pnl": 0.0,
+    "best_trade": 0.0,
+    "worst_trade": 0.0,
+    "tp1_hits": 0,
+    "tp2_hits": 0,
+    "sl_hits": 0,
+    "zero_loss_cuts": 0,   # berapa kali zero-loss cut aktif
+    "trail_stops": 0,       # berapa kali trailing stop kena
+    "force_closes": 0,
+    "rescans": 0,
+    "session_start": time.time(),
+}
+
+BULL_TRENDS = {"BULL", "MILD_BULL"}
+BEAR_TRENDS = {"BEAR", "MILD_BEAR"}
+
 
 # ════════════════════════════════════════════════════
 #  UTILS
 # ════════════════════════════════════════════════════
 def get_sym_info(symbol):
-    if symbol in _sym_info:
-        return _sym_info[symbol]
+    if symbol in _sym_info: return _sym_info[symbol]
     try:
         for s in client.futures_exchange_info()["symbols"]:
             if s["symbol"] == symbol:
                 for f in s["filters"]:
                     if f["filterType"] == "LOT_SIZE":
                         _sym_info[symbol] = {
-                            "step":   float(f["stepSize"]),
+                            "step": float(f["stepSize"]),
                             "minQty": float(f["minQty"])
                         }
                         return _sym_info[symbol]
-    except:
-        pass
+    except: pass
     return {"step": 1.0, "minQty": 1.0}
 
 def round_step(qty, step):
     p = max(0, int(round(-math.log(step, 10), 0))) if step < 1 else 0
     return round(math.floor(qty / step) * step, p)
 
-def calc_qty(symbol, price, fraction=1.0):
+def calc_qty(symbol, price):
     info = get_sym_info(symbol)
-    return max(
-        round_step((ORDER_USDT * fraction * LEVERAGE) / price / LEVERAGE, info["step"]),
-        info["minQty"]
-    )
+    raw  = (ORDER_USDT * LEVERAGE) / price
+    return max(round_step(raw, info["step"]), info["minQty"])
 
 def set_leverage(symbol):
-    try:
-        client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
-    except:
-        pass
+    try: client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+    except: pass
 
 def get_price(symbol):
+    try: return float(client.futures_symbol_ticker(symbol=symbol)["price"])
+    except: return 0.0
+
+def get_exchange_amt(symbol):
     try:
-        return float(client.futures_symbol_ticker(symbol=symbol)["price"])
-    except:
-        return 0.0
+        for p in client.futures_position_information(symbol=symbol):
+            amt = float(p["positionAmt"])
+            if amt != 0: return amt
+        return 0
+    except: return None
+
+def is_symbol_cooling_down(symbol):
+    if symbol not in _sym_cooldown: return False
+    return (time.time() - _sym_cooldown[symbol]) < SYMBOL_COOLDOWN_SEC
+
+def set_symbol_cooldown(symbol):
+    _sym_cooldown[symbol] = time.time()
 
 def validate_symbols():
     try:
-        valid  = {s["symbol"] for s in client.futures_exchange_info()["symbols"]
-                  if s["status"] == "TRADING"}
+        valid = {s["symbol"] for s in client.futures_exchange_info()["symbols"]
+                 if s["status"] == "TRADING"}
         result = list(dict.fromkeys([s for s in SYMBOLS if s in valid]))
-        removed = [s for s in SYMBOLS if s not in valid]
-        if removed:
-            print(f"  ⚠️  {len(removed)} simbol tidak valid di Futures: {removed}")
-        print(f"  ✅ {len(result)} symbols valid dari {len(SYMBOLS)} list")
+        print(f"  ✅ {len(result)}/{len(SYMBOLS)} symbols valid")
         return result
     except:
         return list(dict.fromkeys(SYMBOLS))
 
-def get_exchange_amt(symbol, retries=3):
-    for attempt in range(retries):
-        try:
-            for p in client.futures_position_information(symbol=symbol):
-                amt = float(p["positionAmt"])
-                if amt != 0:
-                    return amt
-            return 0
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1)
-            else:
-                print(f"  ⚠️  [{symbol}] Gagal query posisi — skip")
-                return None
 
 # ════════════════════════════════════════════════════
-#  OHLCV CACHE (multi-TF)
+#  OHLCV CACHE
 # ════════════════════════════════════════════════════
-def get_ohlcv(symbol, interval, limit=200):
+def get_ohlcv(symbol, interval, limit=100):
     cache_key = (symbol, interval)
     now = time.time()
-
     ttl_map = {
-        Client.KLINE_INTERVAL_4HOUR:    3500,
-        Client.KLINE_INTERVAL_1HOUR:    OHLCV_CACHE_TTL_1H,
-        Client.KLINE_INTERVAL_15MINUTE: OHLCV_CACHE_TTL_15M,
         Client.KLINE_INTERVAL_5MINUTE:  OHLCV_CACHE_TTL_5M,
+        Client.KLINE_INTERVAL_15MINUTE: OHLCV_CACHE_TTL_15M,
+        Client.KLINE_INTERVAL_1HOUR:    OHLCV_CACHE_TTL_1H,
     }
-    ttl = ttl_map.get(interval, 55)
-
+    ttl = ttl_map.get(interval, 30)
     if cache_key in _ohlcv_cache:
         ts, df_cached = _ohlcv_cache[cache_key]
         if now - ts < ttl:
             return df_cached
-
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
@@ -296,995 +362,651 @@ def get_ohlcv(symbol, interval, limit=200):
         return df
     except:
         if cache_key in _ohlcv_cache:
-            _, df_old = _ohlcv_cache[cache_key]
-            return df_old
+            return _ohlcv_cache[cache_key][1]
         return None
 
-def get_current_batch(symbols):
-    global _scan_batch_idx
-    if not symbols:
-        return []
-    total_batches = math.ceil(len(symbols) / BATCH_SIZE)
-    start = _scan_batch_idx * BATCH_SIZE
-    batch = symbols[start:start + BATCH_SIZE]
-    _scan_batch_idx = (_scan_batch_idx + 1) % total_batches
-    return batch
-
-# ════════════════════════════════════════════════════
-#  MACRO CACHE
-# ════════════════════════════════════════════════════
-_macro = {
-    "fng": 50, "fng_label": "Neutral",
-    "usdt_d": 5.0, "usdt_prev": 5.0,
-    "news": "neutral", "news_strength": 0, "headlines": [],
-    "btc_trend_15m": "UNKNOWN",
-    "btc_trend_1h":  "UNKNOWN",
-    "btc_trend_4h":  "UNKNOWN",
-    "market_breadth": 0.5,
-    "global_mcap_chg": 0.0,
-    "scalp_mode": "TREND",
-    "last_fng": 0, "last_dom": 0, "last_news": 0,
-    "last_btc": 0, "last_breadth": 0,
-}
-
-BULL_TRENDS = {"BULL", "MILD_BULL"}
-BEAR_TRENDS = {"BEAR", "MILD_BEAR"}
-
-def _calc_trend(df):
-    if df is None or len(df) < 30:
-        return "UNKNOWN"
-    c     = df["close"]
-    price = c.iloc[-1]
-    ema9  = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
-    ema21 = ta.trend.EMAIndicator(c, 21).ema_indicator().iloc[-1]
-    ema50 = ta.trend.EMAIndicator(c, 50).ema_indicator().iloc[-1]
-    chg   = (price - c.iloc[-4]) / c.iloc[-4] * 100
-
-    if price > ema9 > ema21 > ema50 and chg > 0:
-        return "BULL"
-    elif price < ema9 < ema21 < ema50 and chg < 0:
-        return "BEAR"
-    elif price > ema21 and chg > -0.3:
-        return "MILD_BULL"
-    elif price < ema21 and chg < 0.3:
-        return "MILD_BEAR"
-    return "SIDEWAYS"
-
-def _detect_scalp_mode():
-    t15 = _macro["btc_trend_15m"]
-    t1h = _macro["btc_trend_1h"]
-    if t1h == "SIDEWAYS" and t15 == "SIDEWAYS":
-        return "MEAN_REV"
-    return "TREND"
-
-def refresh_macro():
-    now = time.time()
-
-    if now - _macro["last_fng"] > 300:
-        try:
-            d = requests.get(
-                "https://api.alternative.me/fng/?limit=1", timeout=5
-            ).json()["data"][0]
-            _macro["fng"]       = int(d["value"])
-            _macro["fng_label"] = d["value_classification"]
-            _macro["last_fng"]  = now
-        except:
-            pass
-
-    if now - _macro["last_dom"] > 300:
-        try:
-            d = requests.get(
-                "https://api.coingecko.com/api/v3/global", timeout=8
-            ).json()
-            _macro["usdt_prev"] = _macro["usdt_d"]
-            _macro["usdt_d"]    = round(d["data"]["market_cap_percentage"].get("usdt", 5), 2)
-            _macro["global_mcap_chg"] = round(
-                d["data"].get("market_cap_change_percentage_24h_usd", 0), 2)
-            _macro["last_dom"]  = now
-        except:
-            pass
-
-    if now - _macro["last_news"] > 60:
-        try:
-            data = requests.get(
-                "https://cryptopanic.com/api/v1/posts/?auth_token=demo&public=true&currencies=BTC",
-                timeout=5).json()
-            neg_kw_strong = ["crash","hack","ban","fraud","collapse","seized","scam"]
-            neg_kw_mild   = ["bear","fear","lawsuit","dump","warning","plunge","fud","sell-off","decline"]
-            pos_kw_strong = ["institutional","ath","approved","record","bullish","rally","surge"]
-            pos_kw_mild   = ["adoption","breakout","buy","launched","partnership","soar"]
-            neg = pos = 0
-            hl  = []
-            for post in data.get("results", [])[:10]:
-                t  = post.get("title", "")
-                tl = t.lower()
-                if any(w in tl for w in neg_kw_strong):
-                    neg += 2; hl.append(f"🔴🔴 {t[:55]}")
-                elif any(w in tl for w in neg_kw_mild):
-                    neg += 1; hl.append(f"🔴 {t[:55]}")
-                elif any(w in tl for w in pos_kw_strong):
-                    pos += 2; hl.append(f"🟢🟢 {t[:55]}")
-                elif any(w in tl for w in pos_kw_mild):
-                    pos += 1; hl.append(f"🟢 {t[:55]}")
-            score = pos - neg
-            if score <= -4:   sentiment = "strong_negative"
-            elif score <= -2: sentiment = "negative"
-            elif score >= 4:  sentiment = "strong_positive"
-            elif score >= 2:  sentiment = "positive"
-            else:             sentiment = "neutral"
-            _macro["news"]          = sentiment
-            _macro["news_strength"] = score
-            _macro["headlines"]     = hl[:3]
-            _macro["last_news"]     = now
-        except:
-            pass
-
-    if now - _macro["last_btc"] > 30:
-        try:
-            df_15m = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_15MINUTE, 60)
-            df_1h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
-            df_4h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_4HOUR, 60)
-            _macro["btc_trend_15m"] = _calc_trend(df_15m)
-            _macro["btc_trend_1h"]  = _calc_trend(df_1h)
-            _macro["btc_trend_4h"]  = _calc_trend(df_4h)
-            _macro["scalp_mode"]    = _detect_scalp_mode()
-            _macro["last_btc"]      = now
-        except:
-            pass
-
-    if now - _macro["last_breadth"] > 120:
-        try:
-            bullish = 0
-            counted = 0
-            # [FIX] sample lebih banyak untuk akurasi
-            sample  = SYMBOLS[:20]
-            for sym in sample:
-                df = get_ohlcv(sym, Client.KLINE_INTERVAL_15MINUTE, 30)
-                if df is not None and len(df) >= 10:
-                    c    = df["close"]
-                    ema9 = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
-                    counted += 1
-                    if c.iloc[-1] > ema9 or df["close"].iloc[-1] > df["open"].iloc[-1]:
-                        bullish += 1
-            if counted > 0:
-                _macro["market_breadth"] = bullish / counted
-            else:
-                _macro["market_breadth"] = 0.5
-            _macro["last_breadth"] = now
-            print(f"  📊 Breadth: {bullish}/{counted} = {_macro['market_breadth']*100:.0f}%")
-        except Exception as e:
-            if _macro["market_breadth"] == 0:
-                _macro["market_breadth"] = 0.5
-            print(f"  ⚠️  Breadth error: {e} → fallback {_macro['market_breadth']*100:.0f}%")
-
-# ════════════════════════════════════════════════════
-#  FLASH CRASH DETECTOR
-# ════════════════════════════════════════════════════
-def update_btc_price_history():
-    try:
-        price = get_price("BTCUSDT")
-        if price > 0:
-            _btc_price_history.append((time.time(), price))
-    except:
-        pass
-
-def detect_flash_move():
-    if len(_btc_price_history) < 2:
-        return "none", 0.0
-    now    = time.time()
-    cutoff = now - FLASH_WINDOW_SEC
-    oldest_price = None
-    for ts, px in _btc_price_history:
-        if ts >= cutoff:
-            oldest_price = px
-            break
-    if oldest_price is None:
-        return "none", 0.0
-    current_price = _btc_price_history[-1][1]
-    pct_change = (current_price - oldest_price) / oldest_price * 100
-    if pct_change <= -FLASH_CRASH_PCT:
-        return "crash", abs(pct_change)
-    if pct_change >= FLASH_PUMP_PCT:
-        return "pump", abs(pct_change)
-    return "none", 0.0
 
 # ════════════════════════════════════════════════════
 #  TECHNICAL ANALYSIS
 # ════════════════════════════════════════════════════
 def run_ta(df):
     c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
-    df["rsi"]        = ta.momentum.RSIIndicator(c, 14).rsi()
-    df["rsi_fast"]   = ta.momentum.RSIIndicator(c, 7).rsi()
-    macd             = ta.trend.MACD(c)
-    df["macd"]       = macd.macd()
-    df["macd_sig"]   = macd.macd_signal()
-    df["macd_hist"]  = macd.macd_diff()
-    df["ema9"]       = ta.trend.EMAIndicator(c, 9).ema_indicator()
-    df["ema21"]      = ta.trend.EMAIndicator(c, 21).ema_indicator()
-    df["ema50"]      = ta.trend.EMAIndicator(c, 50).ema_indicator()
-    df["ema200"]     = ta.trend.EMAIndicator(c, 200).ema_indicator()
-    bb               = ta.volatility.BollingerBands(c, 20, 2)
-    df["bb_hi"]      = bb.bollinger_hband()
-    df["bb_lo"]      = bb.bollinger_lband()
-    df["bb_mid"]     = bb.bollinger_mavg()
-    df["bb_width"]   = (df["bb_hi"] - df["bb_lo"]) / df["bb_mid"]
-    stoch            = ta.momentum.StochasticOscillator(h, l, c, 14, 3)
-    df["stk"]        = stoch.stoch()
-    df["std"]        = stoch.stoch_signal()
-    df["atr"]        = ta.volatility.AverageTrueRange(h, l, c, 14).average_true_range()
-    df["vol_ma"]     = v.rolling(20).mean()
-    df["vol_ratio"]  = v / df["vol_ma"].replace(0, 1)
-    df["buy_ratio"]  = df["tbbase"] / df["volume"].replace(0, 1)
-    df["body"]       = abs(df["close"] - df["open"])
-    df["range_"]     = df["high"] - df["low"]
-    df["body_ratio"] = df["body"] / df["range_"].replace(0, 1)
+    df["rsi"]       = ta.momentum.RSIIndicator(c, 14).rsi()
+    df["rsi_fast"]  = ta.momentum.RSIIndicator(c, 7).rsi()
+    macd            = ta.trend.MACD(c, 12, 26, 9)
+    df["macd"]      = macd.macd()
+    df["macd_sig"]  = macd.macd_signal()
+    df["macd_hist"] = macd.macd_diff()
+    df["ema5"]      = ta.trend.EMAIndicator(c, 5).ema_indicator()
+    df["ema9"]      = ta.trend.EMAIndicator(c, 9).ema_indicator()
+    df["ema21"]     = ta.trend.EMAIndicator(c, 21).ema_indicator()
+    df["ema50"]     = ta.trend.EMAIndicator(c, 50).ema_indicator()
+    bb              = ta.volatility.BollingerBands(c, 20, 2)
+    df["bb_hi"]     = bb.bollinger_hband()
+    df["bb_lo"]     = bb.bollinger_lband()
+    df["bb_mid"]    = bb.bollinger_mavg()
+    df["bb_width"]  = (df["bb_hi"] - df["bb_lo"]) / df["bb_mid"]
+    stoch           = ta.momentum.StochasticOscillator(h, l, c, 14, 3)
+    df["stk"]       = stoch.stoch()
+    df["std"]       = stoch.stoch_signal()
+    df["atr"]       = ta.volatility.AverageTrueRange(h, l, c, 14).average_true_range()
+    df["vol_ma"]    = v.rolling(20).mean()
+    df["vol_ratio"] = v / df["vol_ma"].replace(0, 1)
+    df["buy_ratio"] = df["tbbase"] / df["volume"].replace(0, 1)
+    df["body"]      = abs(df["close"] - df["open"])
+    df["range_"]    = df["high"] - df["low"]
+    df["body_ratio"]= df["body"] / df["range_"].replace(0, 1)
+    df["bb_squeeze"]= df["bb_width"] < df["bb_width"].rolling(20).mean() * 0.85
     return df
 
-# ════════════════════════════════════════════════════
-#  1H BIAS — [FIX] threshold diturunkan
-# ════════════════════════════════════════════════════
-def get_1h_bias(symbol):
-    """
-    Analisis 1H candle untuk tentukan BIAS.
-    [FIX] Threshold: 55% → 48%, margin: 10 → 8
-    Sehingga lebih banyak simbol mendapat bias direction.
-    """
-    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 60)
-    if df is None or len(df) < 55:
-        return "NONE", 0
+def _calc_trend(df):
+    if df is None or len(df) < 25: return "UNKNOWN"
+    c     = df["close"]
+    price = c.iloc[-1]
+    ema9  = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
+    ema21 = ta.trend.EMAIndicator(c, 21).ema_indicator().iloc[-1]
+    ema50 = ta.trend.EMAIndicator(c, 50).ema_indicator().iloc[-1]
+    chg   = (price - c.iloc[-4]) / c.iloc[-4] * 100
+    if price > ema9 > ema21 > ema50 and chg > 0:   return "BULL"
+    elif price < ema9 < ema21 < ema50 and chg < 0: return "BEAR"
+    elif price > ema21 and chg > -0.2:             return "MILD_BULL"
+    elif price < ema21 and chg < 0.2:              return "MILD_BEAR"
+    return "SIDEWAYS"
 
-    df = run_ta(df.copy())
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    score_long  = 0
-    score_short = 0
-    max_pts     = 0
-
-    # EMA Stack (paling penting di 1H)
-    e9, e21, e50 = last["ema9"], last["ema21"], last["ema50"]
-    if e9 > e21 > e50:
-        score_long += 35
-    elif e9 < e21 < e50:
-        score_short += 35
-    elif e9 > e21:
-        score_long += 15
-    elif e9 < e21:
-        score_short += 15
-    max_pts += 35
-
-    # Price vs EMA200
-    ema200 = last["ema200"]
-    if last["close"] > ema200:
-        score_long += 20
-    else:
-        score_short += 20
-    max_pts += 20
-
-    # MACD momentum
-    if last["macd_hist"] > 0 and last["macd_hist"] > prev["macd_hist"]:
-        score_long += 25
-    elif last["macd_hist"] < 0 and last["macd_hist"] < prev["macd_hist"]:
-        score_short += 25
-    max_pts += 25
-
-    # RSI zone
-    rsi = last["rsi"]
-    if rsi > 50 and rsi < 70:
-        score_long += 10
-    elif rsi < 50 and rsi > 30:
-        score_short += 10
-    elif rsi >= 70:
-        score_short += 5
-    elif rsi <= 30:
-        score_long += 5
-    max_pts += 10
-
-    # Stoch
-    if last["stk"] > last["std"] and last["stk"] < 80:
-        score_long += 10
-    elif last["stk"] < last["std"] and last["stk"] > 20:
-        score_short += 10
-    max_pts += 10
-
-    long_pct  = (score_long  / max_pts * 100)
-    short_pct = (score_short / max_pts * 100)
-
-    # [FIX] Threshold diturunkan 55→48, margin 10→8
-    if long_pct >= BIAS_THRESHOLD and long_pct > short_pct + BIAS_MARGIN:
-        return "LONG", long_pct
-    if short_pct >= BIAS_THRESHOLD and short_pct > long_pct + BIAS_MARGIN:
-        return "SHORT", short_pct
-    return "NONE", max(long_pct, short_pct)
 
 # ════════════════════════════════════════════════════
-#  5m ENTRY TRIGGER
+#  MACRO REFRESH
 # ════════════════════════════════════════════════════
-def get_5m_entry_signals(symbol, direction):
-    """
-    [FIX] RSI bounce threshold: 40→45 (lebih sering trigger di bull market)
-    [FIX] Engulfing: body_ratio 0.6→0.5 (lebih longgar)
-    """
-    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_5MINUTE, 50)
-    if df is None or len(df) < 20:
-        return 0, ["Data 5m tidak cukup"]
+def refresh_macro():
+    now = time.time()
+    if now - _macro["last_fng"] > 300:
+        try:
+            d = requests.get("https://api.alternative.me/fng/?limit=1", timeout=5).json()["data"][0]
+            _macro["fng"]       = int(d["value"])
+            _macro["fng_label"] = d["value_classification"]
+            _macro["last_fng"]  = now
+        except: pass
 
-    df = run_ta(df.copy())
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    signals = []
+    if now - _macro["last_btc"] > 10:
+        try:
+            df_5m  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_5MINUTE, 60)
+            df_15m = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_15MINUTE, 60)
+            df_1h  = get_ohlcv("BTCUSDT", Client.KLINE_INTERVAL_1HOUR, 60)
+            _macro["btc_trend_5m"]  = _calc_trend(df_5m)
+            _macro["btc_trend_15m"] = _calc_trend(df_15m)
+            _macro["btc_trend_1h"]  = _calc_trend(df_1h)
+            _macro["last_btc"]      = now
+            t5m  = _macro["btc_trend_5m"]
+            t15m = _macro["btc_trend_15m"]
+            if t15m in ("BULL","BEAR") or t5m in ("BULL","BEAR"):
+                _macro["scalp_mode"] = "TREND"
+            else:
+                _macro["scalp_mode"] = "MEAN_REV"
+        except: pass
 
-    # Sinyal 1: Bullish/Bearish Engulfing — [FIX] body_ratio 0.6→0.5
-    if direction == "LONG":
-        if (last["close"] > last["open"] and
-            last["close"] > prev["high"] and
-            last["body_ratio"] > 0.50):
-            signals.append("🕯️ Engulfing LONG")
-    else:
-        if (last["close"] < last["open"] and
-            last["close"] < prev["low"] and
-            last["body_ratio"] > 0.50):
-            signals.append("🕯️ Engulfing SHORT")
+    if now - _macro["last_breadth"] > 60:
+        try:
+            bullish = 0
+            sample  = SYMBOLS[:20]
+            for sym in sample:
+                df = get_ohlcv(sym, Client.KLINE_INTERVAL_5MINUTE, 10)
+                if df is not None and len(df) >= 5:
+                    c  = df["close"]
+                    e9 = ta.trend.EMAIndicator(c, 9).ema_indicator().iloc[-1]
+                    if c.iloc[-1] > e9: bullish += 1
+            _macro["market_breadth"] = bullish / len(sample)
+            _macro["last_breadth"]   = now
+        except: pass
 
-    # Sinyal 2: RSI Bounce — [FIX] threshold 40→45 untuk LONG, 60→55 untuk SHORT
-    rsi      = last["rsi"]
-    rsi_fast = last["rsi_fast"]
-    if direction == "LONG" and rsi < 45 and rsi_fast > df.iloc[-2]["rsi_fast"]:
-        signals.append(f"📈 RSI bounce ({rsi:.0f})")
-    elif direction == "SHORT" and rsi > 55 and rsi_fast < df.iloc[-2]["rsi_fast"]:
-        signals.append(f"📉 RSI pullback ({rsi:.0f})")
+    if now - _macro.get("last_news", 0) > 120:
+        try:
+            data = requests.get(
+                "https://cryptopanic.com/api/v1/posts/?auth_token=demo&public=true&currencies=BTC",
+                timeout=5).json()
+            neg_kw = ["crash","hack","ban","fraud","collapse","seized","scam","plunge"]
+            pos_kw = ["institutional","ath","approved","record","bullish","rally","surge"]
+            neg = pos = 0
+            for post in data.get("results", [])[:8]:
+                tl = post.get("title","").lower()
+                if any(w in tl for w in neg_kw): neg += 1
+                if any(w in tl for w in pos_kw): pos += 1
+            score = pos - neg
+            if score <= -3:   _macro["news"] = "strong_negative"
+            elif score <= -1: _macro["news"] = "negative"
+            elif score >= 3:  _macro["news"] = "strong_positive"
+            else:             _macro["news"] = "neutral"
+            _macro["last_news"] = now
+        except: pass
 
-    # Sinyal 3: EMA9 Cross di 5m
-    ema9_now   = last["ema9"]
-    ema9_prev  = prev["ema9"]
-    ema21_now  = last["ema21"]
-    ema21_prev = prev["ema21"]
-    if direction == "LONG":
-        if (last["close"] > ema9_now and prev["close"] <= ema9_prev) or \
-           (ema9_now > ema21_now and ema9_prev <= ema21_prev):
-            signals.append("➡️ EMA9 cross LONG")
-    else:
-        if (last["close"] < ema9_now and prev["close"] >= ema9_prev) or \
-           (ema9_now < ema21_now and ema9_prev >= ema21_prev):
-            signals.append("➡️ EMA9 cross SHORT")
-
-    # Sinyal 4: Volume Spike — [FIX] threshold 1.5→1.3, buy_ratio 0.55→0.52
-    if last["vol_ratio"] >= 1.3:
-        if direction == "LONG" and last["buy_ratio"] > 0.52 and last["close"] > last["open"]:
-            signals.append(f"📊 Vol spike 5m ({last['vol_ratio']:.1f}x)")
-        elif direction == "SHORT" and last["buy_ratio"] < 0.48 and last["close"] < last["open"]:
-            signals.append(f"📊 Vol spike 5m ({last['vol_ratio']:.1f}x)")
-
-    # Sinyal 5: Mini Breakout
-    recent_10 = df.iloc[-11:-1]
-    mini_high = recent_10["high"].max()
-    mini_low  = recent_10["low"].min()
-    if direction == "LONG" and last["close"] > mini_high:
-        signals.append(f"🚀 Breakout mini range ({mini_high:.4f})")
-    elif direction == "SHORT" and last["close"] < mini_low:
-        signals.append(f"💥 Breakdown mini range ({mini_low:.4f})")
-
-    # Sinyal 6: Stochastic cross
-    if direction == "LONG" and last["stk"] > last["std"] and prev["stk"] <= prev["std"] and last["stk"] < 80:
-        signals.append(f"⚡ Stoch GX 5m ({last['stk']:.0f})")
-    elif direction == "SHORT" and last["stk"] < last["std"] and prev["stk"] >= prev["std"] and last["stk"] > 20:
-        signals.append(f"⚡ Stoch DX 5m ({last['stk']:.0f})")
-
-    # [NEW] Sinyal 7: Candle hijau/merah sederhana dengan volume di atas rata-rata
-    if direction == "LONG" and last["close"] > last["open"] and last["vol_ratio"] > 1.0:
-        signals.append(f"🟢 Green candle vol ({last['vol_ratio']:.1f}x)")
-    elif direction == "SHORT" and last["close"] < last["open"] and last["vol_ratio"] > 1.0:
-        signals.append(f"🔴 Red candle vol ({last['vol_ratio']:.1f}x)")
-
-    return len(signals), signals
-
-# ════════════════════════════════════════════════════
-#  MEAN REVERSION MODE
-# ════════════════════════════════════════════════════
-def check_mean_reversion_setup(df_15m, symbol):
-    """
-    [FIX] BB pct threshold: 0.30→0.35, RSI threshold: 45→48
-    Lebih sering trigger di ranging market.
-    """
-    if df_15m is None or len(df_15m) < 30:
-        return None, 0
-
-    last = df_15m.iloc[-1]
-    prev = df_15m.iloc[-2]
-
-    bb_lo  = last["bb_lo"]
-    bb_hi  = last["bb_hi"]
-    bb_mid = last["bb_mid"]
-    price  = last["close"]
-    rsi    = last["rsi"]
-    bb_pct = (price - bb_lo) / (bb_hi - bb_lo) if (bb_hi - bb_lo) > 0 else 0.5
-
-    # Setup LONG — [FIX] 0.30→0.35, RSI 45→48
-    if bb_pct <= 0.35 and rsi < 48:
-        score = 52
-        if bb_pct <= 0.20: score += 12
-        elif bb_pct <= 0.30: score += 8
-        if rsi < 38:       score += 10
-        if last["vol_ratio"] > 1.0: score += 8
-        if last["stk"] < 35 and last["stk"] > last["std"]: score += 10
-        if last["close"] > last["open"]: score += 5
-        if prev["close"] < prev["open"] and last["close"] > last["open"]: score += 5
-        return "LONG", min(score, 100)
-
-    # Setup SHORT — [FIX] 0.70→0.65, RSI 55→52
-    if bb_pct >= 0.65 and rsi > 52:
-        score = 52
-        if bb_pct >= 0.80: score += 12
-        elif bb_pct >= 0.70: score += 8
-        if rsi > 62:       score += 10
-        if last["vol_ratio"] > 1.0: score += 8
-        if last["stk"] > 65 and last["stk"] < last["std"]: score += 10
-        if last["close"] < last["open"]: score += 5
-        if prev["close"] > prev["open"] and last["close"] < last["open"]: score += 5
-        return "SHORT", min(score, 100)
-
-    return None, 0
-
-# ════════════════════════════════════════════════════
-#  TREND MODE — [FIX UTAMA]
-# ════════════════════════════════════════════════════
-def check_trend_pullback_setup(df_15m, bias_direction):
-    """
-    [FIX] 3 kondisi entry (sebelumnya hanya 2):
-    A) Pullback dekat EMA9/EMA21 — tolerance ditingkatkan 0.8% → 2.5%
-    B) Trend continuation: harga di sisi benar EMA dengan volume
-    C) [NEW] Full stack confirmation: semua EMA aligned + candle searah
-       (menangkap strong trend yang TIDAK pullback)
-
-    Kondisi C penting karena saat market strong bull (BTC BULL + Breadth 93%),
-    harga jarang pullback ke EMA — kondisi original tidak pernah trigger.
-    """
-    if df_15m is None or len(df_15m) < 30:
-        return None, 0
-
-    last  = df_15m.iloc[-1]
-    prev  = df_15m.iloc[-2]
-    price = last["close"]
-    e9    = last["ema9"]
-    e21   = last["ema21"]
-    e50   = last["ema50"]
-
-    if bias_direction == "LONG":
-        # ── Kondisi A: Pullback dekat EMA — [FIX] 0.008 → EMA_TOUCH_PCT (0.025)
-        touch_ema9  = abs(price - e9)  / price < EMA_TOUCH_PCT
-        touch_ema21 = abs(price - e21) / price < EMA_TOUCH_PCT
-        if (touch_ema9 or touch_ema21) and price > e50:
-            score = 58
-            if last["rsi"] < 58:              score += 10
-            if last["vol_ratio"] > 1.0:       score += 8
-            if last["close"] > last["open"]:  score += 8
-            if e9 > e21:                      score += 8
-            if last["macd_hist"] > 0:         score += 6
-            return "LONG", min(score, 100)
-
-        # ── Kondisi B: Trend continuation dengan volume
-        if price > e9 > e21 and last["vol_ratio"] > BASE_VOL_SPIKE and last["close"] > last["open"]:
-            score = 58
-            if last["rsi"] < 65:        score += 10
-            if last["macd_hist"] > 0:   score += 8
-            if e9 > e50:                score += 8
-            if last["vol_ratio"] > 1.3: score += 6
-            return "LONG", min(score, 100)
-
-        # ── Kondisi C [NEW]: Full Bull Stack — harga di atas semua EMA
-        # Menangkap strong trend yang tidak pullback
-        if price > e9 > e21 > e50:
-            score = 55
-            if last["rsi"] > 45 and last["rsi"] < 70: score += 8
-            if last["macd_hist"] > 0:                  score += 8
-            if last["close"] > last["open"]:           score += 8
-            if prev["close"] > prev["open"]:           score += 5
-            if last["vol_ratio"] > 0.8:                score += 6
-            return "LONG", min(score, 100)
-
-        # ── Kondisi D [NEW]: Price baru menembus EMA21 ke atas
-        if last["close"] > e21 and prev["close"] <= prev["ema21"]:
-            score = 60
-            if last["rsi"] < 65:              score += 8
-            if last["vol_ratio"] > 1.0:       score += 10
-            if last["macd_hist"] > 0:         score += 8
-            return "LONG", min(score, 100)
-
-    elif bias_direction == "SHORT":
-        # ── Kondisi A: Pullback dekat EMA
-        touch_ema9  = abs(price - e9)  / price < EMA_TOUCH_PCT
-        touch_ema21 = abs(price - e21) / price < EMA_TOUCH_PCT
-        if (touch_ema9 or touch_ema21) and price < e50:
-            score = 58
-            if last["rsi"] > 42:              score += 10
-            if last["vol_ratio"] > 1.0:       score += 8
-            if last["close"] < last["open"]:  score += 8
-            if e9 < e21:                      score += 8
-            if last["macd_hist"] < 0:         score += 6
-            return "SHORT", min(score, 100)
-
-        # ── Kondisi B: Trend continuation
-        if price < e9 < e21 and last["vol_ratio"] > BASE_VOL_SPIKE and last["close"] < last["open"]:
-            score = 58
-            if last["rsi"] > 35:        score += 10
-            if last["macd_hist"] < 0:   score += 8
-            if e9 < e50:                score += 8
-            if last["vol_ratio"] > 1.3: score += 6
-            return "SHORT", min(score, 100)
-
-        # ── Kondisi C [NEW]: Full Bear Stack
-        if price < e9 < e21 < e50:
-            score = 55
-            if last["rsi"] > 30 and last["rsi"] < 55: score += 8
-            if last["macd_hist"] < 0:                  score += 8
-            if last["close"] < last["open"]:           score += 8
-            if prev["close"] < prev["open"]:           score += 5
-            if last["vol_ratio"] > 0.8:                score += 6
-            return "SHORT", min(score, 100)
-
-        # ── Kondisi D [NEW]: Price baru menembus EMA21 ke bawah
-        if last["close"] < e21 and prev["close"] >= prev["ema21"]:
-            score = 60
-            if last["rsi"] > 35:              score += 8
-            if last["vol_ratio"] > 1.0:       score += 10
-            if last["macd_hist"] < 0:         score += 8
-            return "SHORT", min(score, 100)
-
-    return None, 0
-
-# ════════════════════════════════════════════════════
-#  15m COMPOSITE SCORE — [FIX NORMALISASI]
-# ════════════════════════════════════════════════════
-def get_funding(symbol):
+def update_btc_price():
     try:
-        data = client.futures_funding_rate(symbol=symbol, limit=FUNDING_LOOKBACK + 1)
-        if not data:
-            return 0.0, "flat"
-        rates = [round(float(d["fundingRate"]) * 100, 4) for d in data]
-        avg   = round(sum(rates[:FUNDING_LOOKBACK]) / min(len(rates), FUNDING_LOOKBACK), 4)
-        trend = "rising"  if len(rates) >= 2 and rates[0] - rates[-1] > 0.01  else \
-                "falling" if len(rates) >= 2 and rates[0] - rates[-1] < -0.01 else "flat"
-        return avg, trend
-    except:
-        return 0.0, "flat"
+        px = get_price("BTCUSDT")
+        if px > 0: _btc_price_history.append((time.time(), px))
+    except: pass
 
+def detect_flash_move():
+    if len(_btc_price_history) < 2: return "none", 0.0
+    cutoff  = time.time() - 180
+    oldest  = next((px for ts, px in _btc_price_history if ts >= cutoff), None)
+    if oldest is None: return "none", 0.0
+    current = _btc_price_history[-1][1]
+    pct = (current - oldest) / oldest * 100
+    if pct <= -0.8: return "crash", abs(pct)
+    if pct >= 0.8:  return "pump",  abs(pct)
+    return "none", 0.0
+
+
+# ════════════════════════════════════════════════════
+#  ORDER BOOK IMBALANCE
+# ════════════════════════════════════════════════════
 def get_ob_imbalance(symbol):
     try:
-        ob    = client.futures_order_book(symbol=symbol, limit=50)
-        bids  = sum(float(b[1]) for b in ob["bids"])
-        asks  = sum(float(a[1]) for a in ob["asks"])
+        ob    = client.futures_order_book(symbol=symbol, limit=20)
+        bids  = sum(float(b[1]) for b in ob["bids"][:10])
+        asks  = sum(float(a[1]) for a in ob["asks"][:10])
         total = bids + asks
         return round((bids - asks) / total, 3) if total else 0.0
-    except:
-        return 0.0
+    except: return 0.0
 
-def get_cum_delta(df, lookback=10):
-    if len(df) < lookback:
-        return 0.0
-    recent = df.tail(lookback).copy()
-    recent["delta"] = recent["tbbase"] - (recent["volume"] - recent["tbbase"])
-    norm = recent["delta"].sum() / (recent["volume"].sum() + 1)
-    return round(norm, 3)
 
-def calc_15m_score(df, direction, ob_imb, cum_d, funding_avg, funding_trend,
-                   mode_score=0, signal_5m_count=0):
-    """
-    [FIX UTAMA] Normalisasi score:
-    - Sebelumnya: max_possible = sum(W.values()) * 1.5 = 150
-      → Score 52 butuh 78 raw points dari 100 → hampir mustahil
-    - Sesudah: max_possible = sum(W.values()) = 100
-      → Score 38 butuh 38 raw points dari 100 → realistis
+# ════════════════════════════════════════════════════
+#  ENTRY SCORE ENGINE
+# ════════════════════════════════════════════════════
+def get_hft_entry_score(symbol, df_5m, direction):
+    if df_5m is None or len(df_5m) < 30:
+        return 0, []
+    last  = df_5m.iloc[-1]
+    prev  = df_5m.iloc[-2]
+    prev2 = df_5m.iloc[-3]
+    sigs  = []
+    score = 0
 
-    [FIX] RSI scoring: threshold lebih longgar
-    [FIX] Volume: BASE_VOL_SPIKE lebih rendah (1.1)
-    """
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    W    = SCORE_WEIGHTS
-    breakdown = {}
-    score = 0.0
+    rsi      = last["rsi"]
+    rsi_fast = last["rsi_fast"]
+    rsi_prev = prev["rsi_fast"]
 
-    # 1. MACD Histogram
-    hist_now  = last["macd_hist"]
-    hist_prev = prev["macd_hist"]
     if direction == "LONG":
-        if hist_now > 0 and hist_now > hist_prev:
-            pts = W["macd_hist"] if last["macd"] > last["macd_sig"] else W["macd_hist"] * 0.7
-            score += pts; breakdown["macd"] = f"+{pts:.1f}"
-        elif hist_now > hist_prev:            # [FIX] partial point untuk momentum naik walau masih negatif
-            pts = W["macd_hist"] * 0.3
-            score += pts; breakdown["macd"] = f"+{pts:.1f}(rising)"
-        else: breakdown["macd"] = "0"
+        if rsi < 45 and rsi_fast > rsi_prev:
+            score += 20; sigs.append(f"📈RSI bounce({rsi:.0f}↑)")
+        elif rsi < 55 and rsi_fast > rsi_prev:
+            score += 10; sigs.append(f"📈RSI ok({rsi:.0f})")
+        elif rsi > 70:
+            score -= 10
     else:
-        if hist_now < 0 and hist_now < hist_prev:
-            pts = W["macd_hist"] if last["macd"] < last["macd_sig"] else W["macd_hist"] * 0.7
-            score += pts; breakdown["macd"] = f"+{pts:.1f}"
-        elif hist_now < hist_prev:
-            pts = W["macd_hist"] * 0.3
-            score += pts; breakdown["macd"] = f"+{pts:.1f}(falling)"
-        else: breakdown["macd"] = "0"
+        if rsi > 55 and rsi_fast < rsi_prev:
+            score += 20; sigs.append(f"📉RSI reject({rsi:.0f}↓)")
+        elif rsi > 45 and rsi_fast < rsi_prev:
+            score += 10; sigs.append(f"📉RSI ok({rsi:.0f})")
+        elif rsi < 30:
+            score -= 10
 
-    # 2. RSI — [FIX] threshold lebih longgar
-    rsi = last["rsi"]
+    h_now   = last["macd_hist"]
+    h_prev  = prev["macd_hist"]
+    h_prev2 = prev2["macd_hist"]
+
     if direction == "LONG":
-        if rsi < 40:   pts = W["rsi"]
-        elif rsi < 50: pts = W["rsi"] * 0.7   # [FIX] 0.5→0.7
-        elif rsi < 60: pts = W["rsi"] * 0.3   # [FIX] NEW zone
-        else:          pts = 0
+        if h_now > 0 and h_now > h_prev > h_prev2:
+            score += 20; sigs.append("✅MACD hist naik")
+        elif h_now > h_prev and h_now > 0:
+            score += 12; sigs.append("✅MACD pos")
+        elif h_prev < 0 and h_now >= 0:
+            score += 15; sigs.append("⚡MACD cross 0")
     else:
-        if rsi > 60:   pts = W["rsi"]
-        elif rsi > 50: pts = W["rsi"] * 0.7   # [FIX] 0.5→0.7
-        elif rsi > 40: pts = W["rsi"] * 0.3   # [FIX] NEW zone
-        else:          pts = 0
-    score += pts; breakdown["rsi"] = f"+{pts:.1f}(rsi:{rsi:.0f})"
+        if h_now < 0 and h_now < h_prev < h_prev2:
+            score += 20; sigs.append("✅MACD hist turun")
+        elif h_now < h_prev and h_now < 0:
+            score += 12; sigs.append("✅MACD neg")
+        elif h_prev > 0 and h_now <= 0:
+            score += 15; sigs.append("⚡MACD cross 0")
 
-    # 3. EMA Stack
-    e9, e21, e50 = last["ema9"], last["ema21"], last["ema50"]
-    if direction == "LONG":
-        if e9 > e21 > e50:       pts = W["ema_stack"]
-        elif e9 > e21:           pts = W["ema_stack"] * 0.6
-        elif last["close"] > e21: pts = W["ema_stack"] * 0.3   # [FIX] partial
-        else:                    pts = 0
-    else:
-        if e9 < e21 < e50:       pts = W["ema_stack"]
-        elif e9 < e21:           pts = W["ema_stack"] * 0.6
-        elif last["close"] < e21: pts = W["ema_stack"] * 0.3
-        else:                    pts = 0
-    score += pts; breakdown["ema"] = f"+{pts:.1f}"
-
-    # 4. Volume — [FIX] BASE_VOL_SPIKE lebih rendah (1.1)
     vr = last["vol_ratio"]
     br = last["buy_ratio"]
-    if vr >= BASE_VOL_SPIKE:
-        if direction == "LONG" and last["close"] > last["open"] and br > 0.50:
-            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
-            score += pts; breakdown["vol"] = f"+{pts:.1f}({vr:.1f}x)"
-        elif direction == "SHORT" and last["close"] < last["open"] and br < 0.50:
-            pts = W["volume"] * min(vr / BASE_VOL_SPIKE, 1.5)
-            score += pts; breakdown["vol"] = f"+{pts:.1f}({vr:.1f}x)"
+    if vr >= MIN_VOL_SPIKE:
+        if direction == "LONG" and br > 0.55 and last["close"] > last["open"]:
+            pts = min(20, int(vr * 8)); score += pts
+            sigs.append(f"🔥Vol{vr:.1f}x(buy{br:.0%})")
+        elif direction == "SHORT" and br < 0.45 and last["close"] < last["open"]:
+            pts = min(20, int(vr * 8)); score += pts
+            sigs.append(f"🔥Vol{vr:.1f}x(sell{1-br:.0%})")
         else:
-            # [FIX] Partial: volume spike tapi arah ambigu → setengah poin
-            pts = W["volume"] * 0.3
-            score += pts; breakdown["vol"] = f"+{pts:.1f}(ambigu,{vr:.1f}x)"
-    else: breakdown["vol"] = f"no spike({vr:.1f}x)"
+            score += 5
+    elif vr > 1.0:
+        score += 3
 
-    # 5. OB Imbalance — [FIX] threshold 0.10→0.08
-    if direction == "LONG" and ob_imb > 0.08:
-        pts = W["ob_imbalance"] * min(ob_imb / 0.08, 1.5)
-        score += pts; breakdown["ob"] = f"+{pts:.1f}({ob_imb:+.2f})"
-    elif direction == "SHORT" and ob_imb < -0.08:
-        pts = W["ob_imbalance"] * min(abs(ob_imb) / 0.08, 1.5)
-        score += pts; breakdown["ob"] = f"+{pts:.1f}({ob_imb:+.2f})"
-    else: breakdown["ob"] = f"neutral({ob_imb:+.2f})"
+    recent_5  = df_5m.iloc[-6:-1]
+    micro_hi  = recent_5["high"].max()
+    micro_lo  = recent_5["low"].min()
+    price     = last["close"]
 
-    # 6. Cumulative Delta — [FIX] threshold 0.10→0.08
-    if direction == "LONG" and cum_d > 0.08:
-        score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}"
-    elif direction == "SHORT" and cum_d < -0.08:
-        score += W["cum_delta"]; breakdown["delta"] = f"+{W['cum_delta']}"
-    else: breakdown["delta"] = "0"
+    if direction == "LONG" and price > micro_hi and last["body_ratio"] > 0.5:
+        score += 15; sigs.append(f"🚀Break>{micro_hi:.5g}")
+    elif direction == "SHORT" and price < micro_lo and last["body_ratio"] > 0.5:
+        score += 15; sigs.append(f"💥Break<{micro_lo:.5g}")
+    elif direction == "LONG" and price > (micro_hi + micro_lo) / 2:
+        score += 7
+    elif direction == "SHORT" and price < (micro_hi + micro_lo) / 2:
+        score += 7
 
-    # 7. Stochastic — [FIX] threshold K: 35→40, 65→60
-    k, d_ = last["stk"], last["std"]
-    pk, pd_ = prev["stk"], prev["std"]
-    if direction == "LONG" and k < 40 and k > d_ and pk <= pd_:
-        score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}"
-    elif direction == "SHORT" and k > 60 and k < d_ and pk >= pd_:
-        score += W["stoch"]; breakdown["stoch"] = f"+{W['stoch']}"
-    else: breakdown["stoch"] = "0"
+    e5  = last["ema5"]
+    e9  = last["ema9"]
+    e21 = last["ema21"]
+    p5  = prev["ema5"]
+    p9  = prev["ema9"]
 
-    # 8. Bollinger Band
-    price = last["close"]
-    if direction == "LONG" and price <= last["bb_lo"] * 1.008:   # [FIX] 1.005→1.008
-        score += W["bb"]; breakdown["bb"] = f"+{W['bb']}(BB_lo)"
-    elif direction == "SHORT" and price >= last["bb_hi"] * 0.992: # [FIX] 0.995→0.992
-        score += W["bb"]; breakdown["bb"] = f"+{W['bb']}(BB_hi)"
-    else: breakdown["bb"] = "0"
-
-    # 9. Funding
-    trend_mult = 1.5 if (direction == "LONG"  and funding_trend == "falling") or \
-                        (direction == "SHORT" and funding_trend == "rising") else 1.0
-    if direction == "LONG" and funding_avg < -FUNDING_THRESHOLD:
-        pts = W["funding"] * trend_mult; score += pts
-        breakdown["funding"] = f"+{pts:.1f}({funding_avg:.3f}%)"
-    elif direction == "SHORT" and funding_avg > FUNDING_THRESHOLD:
-        pts = W["funding"] * trend_mult; score += pts
-        breakdown["funding"] = f"+{pts:.1f}({funding_avg:.3f}%)"
-    else: breakdown["funding"] = f"neutral({funding_avg:.3f}%)"
-
-    # 10. Momentum 5m bonus — [FIX] naik ke W["momentum_5m"]=12
-    mode_pts = min(mode_score / 100 * W["momentum_5m"], W["momentum_5m"])
-    sig_pts  = min(signal_5m_count * 4, W["momentum_5m"])   # [FIX] 3→4 per signal
-    bonus    = round(max(mode_pts, sig_pts), 1)
-    score   += bonus
-    breakdown["5m_bonus"] = f"+{bonus}(mode:{mode_score},sig:{signal_5m_count})"
-
-    # ── [FIX] NORMALISASI: max_possible = sum(W) = 100, BUKAN *1.5 ──────────
-    max_possible = sum(W.values())   # = 100
-    final_score  = min(score / max_possible * 100, 100)
-    return final_score, breakdown
-
-# ════════════════════════════════════════════════════
-#  S/R LEVELS
-# ════════════════════════════════════════════════════
-def get_sr_levels(symbol):
-    df = get_ohlcv(symbol, Client.KLINE_INTERVAL_1HOUR, 50)
-    if df is None or len(df) < 10:
-        return {"resistance": [], "support": []}
-    highs = df["high"].values
-    lows  = df["low"].values
-    resistance, support = [], []
-    for i in range(2, len(highs) - 2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-            resistance.append(highs[i])
-        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-            support.append(lows[i])
-    return {"resistance": sorted(resistance, reverse=True)[:3],
-            "support":    sorted(support)[:3]}
-
-def check_sr_clear(symbol, price, direction):
-    sr = get_sr_levels(symbol)
     if direction == "LONG":
-        nearby = [r for r in sr["resistance"] if r > price]
-        if nearby:
-            nearest = min(nearby)
-            gap_pct = (nearest - price) / price
-            if gap_pct < SR_BUFFER:
-                return False, f"Dekat resistance {nearest:.4f} ({gap_pct*100:.2f}%)"
+        if price > e5 > e9 > e21:
+            score += 15; sigs.append("📐EMA bull stack")
+        elif price > e5 > e9:
+            score += 10; sigs.append("📐EMA5>9")
+        elif (e5 > e9 and p5 <= p9):
+            score += 8; sigs.append("📐EMA cross↑")
     else:
-        nearby = [s for s in sr["support"] if s < price]
-        if nearby:
-            nearest = max(nearby)
-            gap_pct = (price - nearest) / price
-            if gap_pct < SR_BUFFER:
-                return False, f"Dekat support {nearest:.4f} ({gap_pct*100:.2f}%)"
-    return True, ""
+        if price < e5 < e9 < e21:
+            score += 15; sigs.append("📐EMA bear stack")
+        elif price < e5 < e9:
+            score += 10; sigs.append("📐EMA5<9")
+        elif (e5 < e9 and p5 >= p9):
+            score += 8; sigs.append("📐EMA cross↓")
+
+    squeeze = bool(last["bb_squeeze"])
+    if direction == "LONG":
+        if price <= last["bb_lo"] * 1.002:
+            score += 10; sigs.append("🎯BB bounce lo")
+        elif squeeze and last["close"] > last["open"] and last["close"] > prev["high"]:
+            score += 10; sigs.append("💥BB squeeze↑")
+        elif price < last["bb_mid"]:
+            score += 3
+    else:
+        if price >= last["bb_hi"] * 0.998:
+            score += 10; sigs.append("🎯BB bounce hi")
+        elif squeeze and last["close"] < last["open"] and last["close"] < prev["low"]:
+            score += 10; sigs.append("💥BB squeeze↓")
+        elif price > last["bb_mid"]:
+            score += 3
+
+    if direction == "LONG" and last["close"] > last["open"] and \
+       last["close"] > prev["high"] and last["body_ratio"] > 0.65:
+        score += 8; sigs.append("🕯️Engulf↑")
+    elif direction == "SHORT" and last["close"] < last["open"] and \
+         last["close"] < prev["low"] and last["body_ratio"] > 0.65:
+        score += 8; sigs.append("🕯️Engulf↓")
+
+    k, d_ = last["stk"], last["std"]
+    pk    = prev["stk"]
+    pd_   = prev["std"]
+    if direction == "LONG" and k > d_ and pk <= pd_ and k < 75:
+        score += 5; sigs.append(f"⚡Stoch GX({k:.0f})")
+    elif direction == "SHORT" and k < d_ and pk >= pd_ and k > 25:
+        score += 5; sigs.append(f"⚡Stoch DX({k:.0f})")
+
+    return max(0, min(score, 100)), sigs
+
+
+def determine_direction(df_5m, df_15m=None):
+    if df_5m is None or len(df_5m) < 20: return None
+    last   = df_5m.iloc[-1]
+    prev   = df_5m.iloc[-2]
+    price  = last["close"]
+    e5, e9 = last["ema5"], last["ema9"]
+    long_pts = short_pts = 0
+
+    if price > e5 > e9:  long_pts  += 3
+    elif price < e5 < e9: short_pts += 3
+    if last["macd_hist"] > prev["macd_hist"]: long_pts  += 2
+    else:                                     short_pts += 2
+    rsi = last["rsi"]
+    if rsi < 50:   long_pts  += 1
+    elif rsi > 50: short_pts += 1
+    if last["buy_ratio"] > 0.52 and last["close"] > last["open"]:  long_pts  += 2
+    elif last["buy_ratio"] < 0.48 and last["close"] < last["open"]: short_pts += 2
+    if df_15m is not None and len(df_15m) >= 20:
+        l15 = df_15m.iloc[-1]
+        if l15["ema9"] > l15["ema21"]: long_pts  += 2
+        else:                          short_pts += 2
+    btc_t = _macro.get("btc_trend_5m", "UNKNOWN")
+    if btc_t in BULL_TRENDS:  long_pts  += 2
+    elif btc_t in BEAR_TRENDS: short_pts += 2
+
+    if long_pts > short_pts and long_pts >= 5:  return "LONG"
+    if short_pts > long_pts and short_pts >= 5: return "SHORT"
+    return None
+
 
 # ════════════════════════════════════════════════════
-#  SMART COOLDOWN
+#  ENTRY FILTER
 # ════════════════════════════════════════════════════
-def is_cooldown_active():
-    global _in_cooldown
-    if not _in_cooldown:
-        return False
-    if _macro["btc_trend_15m"] in COOLDOWN_BTC_RECOVER and \
-       _macro["market_breadth"] >= COOLDOWN_BREADTH_MIN:
-        _in_cooldown = False
-        print(f"  ✅ Cooldown berakhir! BTC:{_macro['btc_trend_15m']} Breadth:{_macro['market_breadth']*100:.0f}%")
-        return False
-    return True
-
-def cooldown_reason():
-    r = []
-    if _macro["btc_trend_15m"] in COOLDOWN_BTC_BAD:
-        r.append(f"BTC {_macro['btc_trend_15m']}")
-    if _macro["market_breadth"] < COOLDOWN_BREADTH_MIN:
-        r.append(f"Breadth {_macro['market_breadth']*100:.0f}%")
-    return " & ".join(r) if r else "kondisi buruk"
-
-# ════════════════════════════════════════════════════
-#  MASTER ENTRY FILTER — [FIX] Pipeline lebih longgar
-# ════════════════════════════════════════════════════
-def should_enter(symbol, df_15m):
-    """
-    Pipeline:
-    1. Macro filter (F&G, news)
-    2. 1H Bias — [FIX] threshold lebih rendah
-    3. Scalp mode → setup
-    4. 5m trigger — [FIX] MIN_5M_SIGNALS lebih longgar
-    5. 15m score — [FIX] threshold 52→38, normalisasi fixed
-    6. S/R check + SL validation
-    """
-    if is_cooldown_active():
-        return None, 0, 0, 0, {"skip": f"🧊 Cooldown ({cooldown_reason()})"}
-
+def should_enter_hft(symbol):
+    if is_symbol_cooling_down(symbol):
+        return None, "cooldown"
     fng  = _macro["fng"]
     news = _macro["news"]
+    if fng < MIN_FNG:              return None, f"F&G={fng}"
+    if news == "strong_negative":  return None, "bad_news"
 
-    if fng < MIN_FNG_ANY:
-        return None, 0, 0, 0, {"skip": f"F&G terlalu ekstrem ({fng})"}
-    if news in ("strong_negative",):
-        return None, 0, 0, 0, {"skip": f"News {news}"}
+    flash_dir, _ = detect_flash_move()
+    if flash_dir != "none":        return None, f"flash_{flash_dir}"
 
-    # ── STEP 2: 1H Bias ──────────────────────────────────────
-    bias_dir, bias_conf = get_1h_bias(symbol)
+    df_5m  = get_ohlcv(symbol, Client.KLINE_INTERVAL_5MINUTE, 80)
+    df_15m = get_ohlcv(symbol, Client.KLINE_INTERVAL_15MINUTE, 60)
+    if df_5m is None or len(df_5m) < 30: return None, "no_data"
 
-    if bias_dir == "NONE":
-        btc_15m = _macro["btc_trend_15m"]
-        btc_1h  = _macro["btc_trend_1h"]
-        if btc_1h in BULL_TRENDS or btc_15m == "BULL":
-            bias_dir, bias_conf = "LONG", 50
-        elif btc_1h in BEAR_TRENDS or btc_15m == "BEAR":
-            bias_dir, bias_conf = "SHORT", 50
-        elif _macro["scalp_mode"] == "TREND":
-            return None, 0, 0, 0, {
-                "skip": f"1H bias tidak jelas (conf:{bias_conf:.0f}%) & BTC neutral"}
+    df_5m  = run_ta(df_5m.copy())
+    if df_15m is not None and len(df_15m) >= 20:
+        df_15m = run_ta(df_15m.copy())
 
-    # ── STEP 3: Candle check & setup ─────────────────────────
-    prev_candle_time = int(df_15m["time"].iloc[-2])
-    if _last_candle.get(symbol) == prev_candle_time:
-        return None, 0, 0, 0, {"skip": "Candle sama, skip"}
+    direction = determine_direction(df_5m, df_15m)
+    if direction is None: return None, "no_direction"
 
-    df_closed = df_15m.iloc[:-1].copy()
-    if len(df_closed) < 50:
-        return None, 0, 0, 0, {"skip": "Data kurang"}
+    btc_5m  = _macro["btc_trend_5m"]
+    btc_15m = _macro["btc_trend_15m"]
+    if direction == "LONG"  and btc_5m in BEAR_TRENDS and btc_15m in BEAR_TRENDS:
+        return None, f"skip LONG — BTC {btc_5m}"
+    if direction == "SHORT" and btc_5m in BULL_TRENDS and btc_15m in BULL_TRENDS:
+        return None, f"skip SHORT — BTC {btc_5m}"
+    if direction == "LONG"  and fng > MAX_FNG_LONG:
+        return None, f"overbought F&G={fng}"
 
-    df_closed = run_ta(df_closed)
-    scalp_mode = _macro["scalp_mode"]
-    direction  = None
-    mode_score = 0
+    score, sigs = get_hft_entry_score(symbol, df_5m, direction)
+    min_score   = MIN_SCORE_MEANREV if _macro["scalp_mode"] == "MEAN_REV" else MIN_SCORE_TREND
+    if score < min_score: return None, f"score={score:.0f}<{min_score}"
+    if len(sigs) < MIN_ENTRY_SIGNALS: return None, f"signals={len(sigs)}"
 
-    if scalp_mode == "MEAN_REV":
-        direction, mode_score = check_mean_reversion_setup(df_closed, symbol)
-        if direction is None:
-            return None, 0, 0, 0, {"skip": "MeanRev: tidak ada BB bounce setup"}
-    else:
-        if bias_dir == "NONE":
-            return None, 0, 0, 0, {"skip": "Trend mode tapi bias tidak jelas"}
-        direction, mode_score = check_trend_pullback_setup(df_closed, bias_dir)
-        if direction is None:
-            return None, 0, 0, 0, {
-                "skip": f"Trend mode: tidak ada setup valid ({bias_dir})"}
+    atr     = df_5m["atr"].iloc[-1]
+    price   = df_5m["close"].iloc[-1]
+    atr_pct = atr / price
+    if atr_pct > MAX_SL_PCT * 2: return None, f"ATR besar({atr_pct*100:.2f}%)"
 
-    # Validasi direction vs macro
-    btc_t1h = _macro["btc_trend_1h"]
-    btc_t4h = _macro["btc_trend_4h"]
+    ob_imb = get_ob_imbalance(symbol)
+    if direction == "LONG"  and ob_imb < -0.25: return None, f"OB imbal SHORT({ob_imb:.2f})"
+    if direction == "SHORT" and ob_imb > 0.25:  return None, f"OB imbal LONG({ob_imb:.2f})"
 
+    entry = price
     if direction == "LONG":
-        if btc_t4h in BEAR_TRENDS:
-            return None, 0, 0, 0, {"skip": f"BTC 4H={btc_t4h} BEAR — skip LONG"}
-        if fng > MAX_FNG_LONG:
-            return None, 0, 0, 0, {"skip": f"F&G terlalu greedy ({fng})"}
-        if scalp_mode == "TREND" and _macro["market_breadth"] < MIN_MARKET_BREADTH:
-            return None, 0, 0, 0, {
-                "skip": f"Breadth rendah ({_macro['market_breadth']*100:.0f}%)"}
-    elif direction == "SHORT":
-        if btc_t4h in BULL_TRENDS and btc_t1h in BULL_TRENDS:
-            return None, 0, 0, 0, {"skip": f"BTC 4H+1H BULL — skip SHORT"}
-
-    # ── STEP 4: 5m entry trigger ─────────────────────────────
-    sig_count, sig_list = get_5m_entry_signals(symbol, direction)
-
-    # [FIX] Logika MIN_5M_SIGNALS lebih cerdas:
-    # - mode_score >= 70: tidak perlu sinyal 5m (setup kuat sudah cukup)
-    # - mode_score 50-70: butuh 1 sinyal
-    # - mode_score < 50: butuh 2 sinyal (selektif)
-    if mode_score >= 70:
-        min_sigs_required = 0
-    elif mode_score >= 50:
-        min_sigs_required = 1
+        sl  = round(entry * (1 - SL_PCT), 8)
+        tp1 = round(entry * (1 + TP1_PCT), 8)
+        tp2 = round(entry * (1 + TP2_PCT), 8)
     else:
-        min_sigs_required = 2
+        sl  = round(entry * (1 + SL_PCT), 8)
+        tp1 = round(entry * (1 - TP1_PCT), 8)
+        tp2 = round(entry * (1 - TP2_PCT), 8)
 
-    if sig_count < min_sigs_required:
-        return None, 0, 0, 0, {
-            "skip": f"5m signals kurang ({sig_count}<{min_sigs_required}, mode:{mode_score})"}
-
-    # ── STEP 5: 15m composite score ──────────────────────────
-    ob_imb                = get_ob_imbalance(symbol)
-    cum_d                 = get_cum_delta(df_closed)
-    fund_avg, fund_trend  = get_funding(symbol)
-
-    score, breakdown = calc_15m_score(
-        df_closed, direction, ob_imb, cum_d, fund_avg, fund_trend,
-        mode_score, sig_count)
-
-    if score < MIN_COMPOSITE_SCORE:
-        return None, 0, 0, 0, {"skip": f"Score rendah ({score:.1f}/{MIN_COMPOSITE_SCORE})"}
-
-    # ── STEP 6: S/R check ────────────────────────────────────
-    price = df_closed["close"].iloc[-1]
-    sr_ok, sr_reason = check_sr_clear(symbol, price, direction)
-    if not sr_ok:
-        return None, 0, 0, 0, {"skip": f"S/R: {sr_reason}"}
-
-    # ── SL/TP kalkulasi ──────────────────────────────────────
-    atr    = df_closed["atr"].iloc[-1]
-    sl_dist = max(ATR_SL_MULT * atr, price * 0.003)
-
-    if direction == "LONG":
-        sl_price  = round(price - sl_dist, 8)
-        tp1_price = round(price + ATR_TP1_MULT * atr, 8)
-        tp2_price = round(price + ATR_TP2_MULT * atr, 8)
-    else:
-        sl_price  = round(price + sl_dist, 8)
-        tp1_price = round(price - ATR_TP1_MULT * atr, 8)
-        tp2_price = round(price - ATR_TP2_MULT * atr, 8)
-
-    sl_pct  = abs(price - sl_price) / price
-    tp1_pct = abs(tp1_price - price) / price
-
-    if sl_pct > MAX_SL_PCT:
-        return None, 0, 0, 0, {"skip": f"ATR terlalu besar (SL={sl_pct*100:.1f}%)"}
-    if tp1_pct / sl_pct < MIN_RR:
-        return None, 0, 0, 0, {
-            "skip": f"R:R buruk ({tp1_pct/sl_pct:.2f}x, min {MIN_RR}x)"}
-
-    _last_candle[symbol] = prev_candle_time
-
-    info = {
-        "score":      f"{score:.1f}/100",
-        "mode":       scalp_mode,
-        "bias_1h":    f"{bias_dir}({bias_conf:.0f}%)",
-        "btc_1h":     btc_t1h,
-        "btc_4h":     btc_t4h,
-        "5m_signals": f"{sig_count}: {', '.join(sig_list[:2])}",
-        "mode_score": f"{mode_score}",
-        "funding":    f"{fund_avg:.4f}%({fund_trend})",
-        "sl_pct":     f"{sl_pct*100:.2f}%",
-        "rr":         f"{tp1_pct/sl_pct:.2f}x",
-        "breadth":    f"{_macro['market_breadth']*100:.0f}%",
-        "breakdown":  breakdown,
+    return direction, {
+        "score":          score,
+        "signals":        sigs,
+        "direction":      direction,
+        "sl":             sl,
+        "tp1":            tp1,
+        "tp2":            tp2,
+        "ob_imb":         ob_imb,
+        "atr_pct":        atr_pct,
+        "scalp_mode":     _macro["scalp_mode"],
+        "btc_trend":      _macro["btc_trend_5m"],
+        "entry_approx":   entry,   # 🔧 FIX: simpan harga saat scan untuk drift check
     }
 
-    return direction, sl_price, tp1_price, tp2_price, info
+
+# ════════════════════════════════════════════════════
+#  PARALLEL SCANNER
+# ════════════════════════════════════════════════════
+def scan_symbol_safe(symbol):
+    try:
+        time.sleep(SCAN_DELAY_MS)
+        direction, info = should_enter_hft(symbol)
+        if direction: return symbol, direction, info
+    except: pass
+    return None
+
+def scan_batch_parallel(symbols):
+    candidates = []
+    futures = {_executor.submit(scan_symbol_safe, sym): sym for sym in symbols}
+    for future in as_completed(futures, timeout=8):
+        result = future.result()
+        if result: candidates.append(result)
+    return candidates
+
+
+# ════════════════════════════════════════════════════
+#  ⚡ PRE-SCAN ENGINE (FITUR BARU v13)
+#  Background thread yang SELALU menjaga kandidat siap
+# ════════════════════════════════════════════════════
+def pre_scan_engine(symbols_active):
+    """
+    Background engine yang terus-menerus scan semua symbol
+    dan menjaga PRE_SCAN_CANDIDATES terbaik selalu siap di antrian.
+    Ketika posisi close, kandidat langsung tersedia tanpa tunggu.
+    """
+    global _scan_batch_idx
+    total_batches = math.ceil(len(symbols_active) / BATCH_SIZE)
+
+    while True:
+        try:
+            # Tentukan symbol yang belum di posisi dan tidak cooldown
+            available = [s for s in symbols_active
+                         if s not in open_positions and not is_symbol_cooling_down(s)]
+
+            if not available:
+                time.sleep(PRE_SCAN_INTERVAL)
+                continue
+
+            # Prioritas: hot symbols dulu
+            hot = [s for s in list(_hot_symbols) if s in available]
+            rest = [s for s in available if s not in hot]
+
+            # Rotate batch
+            batch_start = _scan_batch_idx * BATCH_SIZE
+            batch = (hot + rest[batch_start:batch_start + BATCH_SIZE])[:BATCH_SIZE]
+            _scan_batch_idx = (_scan_batch_idx + 1) % total_batches
+
+            candidates = scan_batch_parallel(batch)
+
+            if candidates:
+                candidates.sort(key=lambda x: x[2].get("score", 0), reverse=True)
+
+                # Update candidate cache dengan deduplikasi
+                with _candidate_lock:
+                    now = time.time()
+                    for sym, direction, info in candidates:
+                        _candidate_cache[sym] = (now, direction, info)
+
+                    # 🔧 FIX: Rebuild priority queue dari cache terbaru
+                    # Staleness check naik dari 10s → CANDIDATE_TTL_PRESCAN (40s)
+                    fresh = [(sym, ts, direction, info)
+                             for sym, (ts, direction, info) in _candidate_cache.items()
+                             if now - ts < CANDIDATE_TTL_PRESCAN
+                             and sym not in open_positions]
+                    fresh.sort(key=lambda x: x[3].get("score", 0), reverse=True)
+
+                    # Clear dan rebuild queue
+                    while not _candidate_queue.empty():
+                        try: _candidate_queue.get_nowait()
+                        except: pass
+
+                    for sym, ts, direction, info in fresh[:PRE_SCAN_CANDIDATES * 2]:
+                        _candidate_queue.put((-info.get("score", 0), sym, direction, info))
+
+                n_queue = _candidate_queue.qsize()
+                top_sym = fresh[0][0] if fresh else "—"
+                top_sc  = fresh[0][3].get("score", 0) if fresh else 0
+                print(f"  🔮 Pre-scan: {len(candidates)} found | Queue:{n_queue} | "
+                      f"Top:{top_sym}({top_sc:.0f})")
+
+        except Exception as e:
+            print(f"  ❌ Pre-scan error: {e}")
+
+        time.sleep(PRE_SCAN_INTERVAL)
+
+
+def get_best_candidate(exclude_symbols=None):
+    """
+    Ambil kandidat terbaik dari antrian pre-scan.
+    Exclude symbol yang sudah di posisi atau cooldown.
+
+    🔧 FIX: TTL naik dari 12s → CANDIDATE_TTL_VALID (45s)
+    supaya kandidat tidak expire sebelum main loop sempat pakai.
+    """
+    exclude = set(exclude_symbols or []) | set(open_positions.keys())
+    with _candidate_lock:
+        now = time.time()
+        # Bersihkan stale candidates dari cache (pakai TTL paling longgar)
+        stale = [k for k, (ts, _, _) in _candidate_cache.items()
+                 if now - ts > CANDIDATE_TTL_STALE]
+        for k in stale:
+            del _candidate_cache[k]
+
+        # Cari kandidat terbaik yang masih valid
+        fresh = [(sym, ts, direction, info)
+                 for sym, (ts, direction, info) in _candidate_cache.items()
+                 if sym not in exclude and not is_symbol_cooling_down(sym)
+                 and now - ts < CANDIDATE_TTL_VALID]   # 🔧 FIX: 45s bukan 12s
+        if not fresh:
+            return None
+        fresh.sort(key=lambda x: x[3].get("score", 0), reverse=True)
+        return fresh[0][0], fresh[0][2], fresh[0][3]  # (symbol, direction, info)
+
+
+# ════════════════════════════════════════════════════
+#  ⚡ TRAIL MECHANICS v13
+# ════════════════════════════════════════════════════
+def calc_trail_sl(pos, current_price):
+    """
+    Hitung trailing stop berdasarkan profit saat ini.
+
+    Rules:
+    - Profit 0.01%+: trail TEPAT di entry (zero-loss lock)
+    - Profit 0.30%+: trail 0.06% di bawah peak
+    - Profit 0.50%+: trail 0.04% di bawah peak
+    - Profit 0.80%+: trail 0.03% di bawah peak (ultra ketat)
+
+    Returns: new_trail_sl (atau None kalau belum profit)
+    """
+    side  = pos["side"]
+    entry = pos["entry"]
+
+    if side == "LONG":
+        profit_pct = (current_price - entry) / entry
+    else:
+        profit_pct = (entry - current_price) / entry
+
+    # Belum profit sama sekali → trail belum aktif
+    if profit_pct < PROFIT_TRIGGER_TRAIL:
+        return None, 0
+
+    # Tentukan trail distance berdasarkan profit level
+    trail_dist = 0.0
+    for threshold, dist in reversed(TRAIL_PHASES):
+        if profit_pct >= threshold:
+            trail_dist = dist
+            break
+
+    # Hitung trailing SL
+    peak = pos.get("peak", entry)
+    if side == "LONG":
+        if trail_dist == 0.0:
+            # Fase awal: trail TEPAT di entry (zero-loss)
+            new_trail_sl = entry
+        else:
+            new_trail_sl = peak * (1 - trail_dist)
+            # Tidak boleh di bawah entry setelah trail aktif
+            new_trail_sl = max(new_trail_sl, entry)
+    else:
+        if trail_dist == 0.0:
+            new_trail_sl = entry
+        else:
+            new_trail_sl = peak * (1 + trail_dist)
+            new_trail_sl = min(new_trail_sl, entry)
+
+    return new_trail_sl, trail_dist
+
 
 # ════════════════════════════════════════════════════
 #  TRADE EXECUTION
 # ════════════════════════════════════════════════════
-def open_trade(symbol, side, sl_price, tp1_price, tp2_price, info):
+def open_trade(symbol, direction, info):
+    with _lock:
+        if symbol in open_positions: return
+        if len(open_positions) >= MAX_POSITIONS: return
     try:
         set_leverage(symbol)
         price = get_price(symbol)
-        qty   = calc_qty(symbol, price, fraction=1.0)
+        if price == 0: return
+        qty = calc_qty(symbol, price)
+
         client.futures_create_order(
             symbol=symbol,
-            side=SIDE_BUY if side == "LONG" else SIDE_SELL,
+            side=SIDE_BUY if direction == "LONG" else SIDE_SELL,
             type=ORDER_TYPE_MARKET,
             quantity=qty)
 
-        entry    = get_price(symbol)
-        trail_sl = entry * (1 - TRAIL_PCT) if side == "LONG" else entry * (1 + TRAIL_PCT)
+        entry = get_price(symbol)
 
-        open_positions[symbol] = {
-            "side":            side,
-            "entry":           entry,
-            "qty":             qty,
-            "qty_remain":      qty,
-            "sl":              sl_price,
-            "tp1":             tp1_price,
-            "tp2":             tp2_price,
-            "peak":            entry,
-            "trail_sl":        trail_sl,
-            "trailing_active": False,
-            "tp1_hit":         False,
-            "be_active":       False,
-            "open_time":       time.time(),
-            "mode":            info.get("mode", "TREND"),
-        }
+        # ─── ZERO-LOSS THRESHOLD ───────────────────────────────────
+        if direction == "LONG":
+            zero_loss_price = entry * (1 - ZERO_LOSS_TICK_PCT)   # 0.01% minus → cut
+            sl_hard         = round(entry * (1 - SL_PCT), 8)
+            tp1             = round(entry * (1 + TP1_PCT), 8)
+            tp2             = round(entry * (1 + TP2_PCT), 8)
+        else:
+            zero_loss_price = entry * (1 + ZERO_LOSS_TICK_PCT)
+            sl_hard         = round(entry * (1 + SL_PCT), 8)
+            tp1             = round(entry * (1 - TP1_PCT), 8)
+            tp2             = round(entry * (1 - TP2_PCT), 8)
 
-        sl_pct  = abs(entry - sl_price) / entry * 100
-        tp1_pct = abs(tp1_price - entry) / entry * 100
-        tp2_pct = abs(tp2_price - entry) / entry * 100
-        score   = info.get("score", "?")
+        with _lock:
+            open_positions[symbol] = {
+                "side":             direction,
+                "entry":            entry,
+                "qty":              qty,
+                "qty_remain":       qty,
+                "sl":               sl_hard,
+                "tp1":              tp1,
+                "tp2":              tp2,
+                "peak":             entry,       # peak price sejauh ini
+                "trail_sl":         None,        # None = trail belum aktif
+                "trail_active":     False,       # trail belum aktif
+                "trail_updates":    0,           # berapa kali trail di-update
+                "trail_max_profit": 0.0,         # max profit yang dicapai
+                "tp1_hit":          False,
+                "be_active":        False,
+                "open_time":        time.time(),
+                "score":            info.get("score", 0),
+                "signals":          info.get("signals", []),
+                "zero_loss_price":  zero_loss_price,  # threshold zero-loss
+                "partial_pnl":      0.0,          # PnL dari partial close
+                "tp1_count":        0,
+                "tp2_count":        0,
+                "trail_tp_count":   0,            # berapa kali trailing stop kena TP
+            }
 
-        print(f"\n  ✅ [{symbol}] {side} ENTRY @{entry:.5f} | qty={qty}")
-        print(f"     SL:{sl_price:.5f}(-{sl_pct:.2f}%) TP1:{tp1_price:.5f}(+{tp1_pct:.2f}%) "
-              f"TP2:{tp2_price:.5f}(+{tp2_pct:.2f}%)")
-        print(f"     Score:{score} | Mode:{info.get('mode','?')} | Bias:{info.get('bias_1h','?')}")
-        print(f"     5m:{info.get('5m_signals','?')} | R:R={info.get('rr','?')} | "
-              f"Fund:{info.get('funding','?')}")
-        print(f"     Breakdown: {info.get('breakdown', {})}")
+        sl_p  = abs(entry - sl_hard) / entry * 100
+        tp1_p = abs(tp1 - entry)     / entry * 100
+        tp2_p = abs(tp2 - entry)     / entry * 100
+        sig_str = " | ".join(info.get("signals", [])[:3])
+
+        print(f"\n  {'🟢' if direction=='LONG' else '🔴'} ENTRY [{symbol}] {direction} @{entry:.6g}")
+        print(f"     💀 ZeroLoss:{ZERO_LOSS_TICK_PCT*100:.2f}% | 🛑 SL:{sl_p:.2f}% | 🎯 TP1:{tp1_p:.2f}% | ✨ TP2:{tp2_p:.2f}%")
+        print(f"     📈 Trail: aktif saat profit {PROFIT_TRIGGER_TRAIL*100:.2f}% (tepat di entry)")
+        print(f"     Score:{info['score']:.0f} | {sig_str}")
+        _stats["total_trades"] += 1
+
+        # Update candidate cache: hapus symbol ini (sudah dipakai)
+        with _candidate_lock:
+            _candidate_cache.pop(symbol, None)
+
     except Exception as e:
-        print(f"  ❌ [{symbol}] Gagal entry: {e}")
+        print(f"  ❌ [{symbol}] Entry error: {e}")
 
-def partial_close(symbol, reason="TP1"):
+
+def partial_close_tp1(symbol):
     pos = open_positions.get(symbol)
-    if pos is None:
-        return
+    if pos is None or pos.get("tp1_hit"): return
     try:
         amt = get_exchange_amt(symbol)
         if amt is None or amt == 0:
-            pos["tp1_hit"] = True
-            return
+            pos["tp1_hit"] = True; return
 
-        half_qty  = round_step(abs(amt) * 0.5, get_sym_info(symbol)["step"])
-        min_qty   = get_sym_info(symbol)["minQty"]
-        close_qty = max(half_qty, min_qty)
-        if close_qty > abs(amt):
-            close_qty = abs(amt)
+        close_qty = round_step(abs(amt) * TP1_CLOSE_RATIO, get_sym_info(symbol)["step"])
+        close_qty = max(close_qty, get_sym_info(symbol)["minQty"])
+        if close_qty > abs(amt): close_qty = abs(amt)
 
         client.futures_create_order(
             symbol=symbol,
@@ -1293,341 +1015,553 @@ def partial_close(symbol, reason="TP1"):
             quantity=close_qty,
             reduceOnly=True)
 
-        exit_price = get_price(symbol)
-        side = pos["side"]
-        pnl  = (exit_price - pos["entry"]) * close_qty if side == "LONG" \
-               else (pos["entry"] - exit_price) * close_qty
-        pct  = pnl / (pos["entry"] * close_qty) * 100
-        hold_min = (time.time() - pos["open_time"]) / 60
+        exit_p  = get_price(symbol)
+        side    = pos["side"]
+        pnl     = (exit_p - pos["entry"]) * close_qty if side == "LONG" \
+                  else (pos["entry"] - exit_p) * close_qty
+        hold_s  = time.time() - pos["open_time"]
+        pct     = abs(exit_p - pos["entry"]) / pos["entry"] * 100
 
-        print(f"  🎯 [{symbol}] PARTIAL TP1 — {reason} | Hold:{hold_min:.0f}m")
-        print(f"     💛 P&L (50%): {pnl:+.4f}U ({pct:+.2f}%)")
+        print(f"\n  🎯 [{symbol}] TP1 PARTIAL ({hold_s:.0f}s)")
+        print(f"     Entry:{pos['entry']:.6g} → Exit:{exit_p:.6g} ({pct:+.3f}%)")
+        print(f"     Qty:{close_qty} | PnL: +{pnl:.4f}U | Sisa: {abs(amt)-close_qty:.4g}")
 
-        pos["tp1_hit"]         = True
-        pos["qty_remain"]      = abs(amt) - close_qty
-        pos["be_active"]       = True
-        pos["sl"]              = pos["entry"]
-        pos["trailing_active"] = True
-        pos["peak"]            = exit_price
-        pos["trail_sl"]        = exit_price * (1 - TRAIL_PCT) if side == "LONG" \
-                                 else exit_price * (1 + TRAIL_PCT)
+        pos["tp1_hit"]    = True
+        pos["tp1_count"]  = pos.get("tp1_count", 0) + 1
+        pos["qty_remain"] = abs(amt) - close_qty
+        pos["be_active"]  = True
+        pos["sl"]         = pos["entry"]    # SL ke breakeven
+        pos["partial_pnl"] += pnl
+        pos["peak"]       = exit_p
+        # Trail setelah TP1 langsung phase 2 (0.06%)
+        pos["trail_sl"]   = exit_p * (1 - 0.0006) if side == "LONG" \
+                            else exit_p * (1 + 0.0006)
+        pos["trail_active"] = True
 
-        trade_log.append({"symbol": symbol, "side": side,
-                          "pnl": round(pnl, 4), "reason": f"Partial {reason}"})
+        _stats["tp1_hits"]  += 1
+        _stats["wins"]      += 1
+        _stats["total_pnl"] += pnl
+        if pnl > _stats["best_trade"]: _stats["best_trade"] = pnl
+
+        trade_log.append({
+            "symbol": symbol, "side": side,
+            "pnl": round(pnl, 4), "reason": "TP1 Partial",
+            "hold_sec": int(hold_s), "entry": pos["entry"], "exit": exit_p,
+        })
+        _hot_symbols.appendleft(symbol)
+        print_stats_inline()
     except Exception as e:
-        print(f"  ❌ [{symbol}] Gagal partial close: {e}")
+        print(f"  ❌ [{symbol}] TP1 error: {e}")
         pos["tp1_hit"] = True
 
+
 def close_trade(symbol, reason=""):
-    global _consec_loss, _in_cooldown
+    """
+    Close posisi dan tampilkan laporan lengkap.
+    """
     try:
         amt = get_exchange_amt(symbol)
-        if amt is None:
-            print(f"  ⚠️  [{symbol}] Query gagal, tunda close")
-            return False
+        if amt is None: return False
         if amt == 0:
-            if symbol in open_positions:
-                pos   = open_positions[symbol]
-                exit_ = get_price(symbol)
-                if exit_ > 0:
-                    qty_r = pos.get("qty_remain", pos["qty"])
-                    pnl   = (exit_ - pos["entry"]) * qty_r if pos["side"] == "LONG" \
-                            else (pos["entry"] - exit_) * qty_r
-                    trade_log.append({"symbol": symbol, "side": pos["side"],
-                                      "pnl": round(pnl, 4), "reason": "External close"})
-                    _update_loss_streak(pnl)
-                open_positions.pop(symbol, None)
+            with _lock: open_positions.pop(symbol, None)
+            set_symbol_cooldown(symbol)
+            _trigger_entry_from_queue()
             return True
+
+        info      = get_sym_info(symbol)
+        close_qty = round_step(abs(amt), info["step"])
+        close_qty = max(close_qty, info["minQty"])
+        close_qty = min(close_qty, round_step(abs(amt), info["step"]))  # tidak melebihi posisi
+
+        if close_qty <= 0:
+            print(f"  ⚠️ [{symbol}] close_qty=0 setelah round, skip close")
+            with _lock: open_positions.pop(symbol, None)
+            set_symbol_cooldown(symbol)
+            return False
 
         client.futures_create_order(
             symbol=symbol,
             side=SIDE_SELL if amt > 0 else SIDE_BUY,
             type=ORDER_TYPE_MARKET,
-            quantity=abs(amt),
+            quantity=close_qty,
             reduceOnly=True)
 
-        if symbol in open_positions:
-            pos   = open_positions[symbol]
-            exit_ = get_price(symbol)
-            qty_r = pos.get("qty_remain", pos["qty"])
-            pnl   = (exit_ - pos["entry"]) * qty_r if pos["side"] == "LONG" \
-                    else (pos["entry"] - exit_) * qty_r
-            pct   = pnl / (pos["entry"] * qty_r) * 100 if qty_r > 0 else 0
-            emoji = "🟢" if pnl >= 0 else "🔴"
-            hold_min = (time.time() - pos.get("open_time", time.time())) / 60
-            be_tag = " [BE]" if pos.get("be_active") else ""
-            print(f"  💰 [{symbol}] CLOSED — {reason}{be_tag} | Hold:{hold_min:.0f}m")
-            print(f"     {emoji} P&L: {pnl:+.4f}U ({pct:+.2f}%)")
-            trade_log.append({"symbol": symbol, "side": pos["side"],
-                              "pnl": round(pnl, 4), "reason": reason})
-            _update_loss_streak(pnl)
+        with _lock:
+            pos = open_positions.pop(symbol, None)
 
-        open_positions.pop(symbol, None)
+        if pos:
+            exit_p      = get_price(symbol)
+            qty_r       = pos.get("qty_remain", pos["qty"])
+            side        = pos["side"]
+            pnl_close   = (exit_p - pos["entry"]) * qty_r if side == "LONG" \
+                          else (pos["entry"] - exit_p) * qty_r
+            partial_pnl = pos.get("partial_pnl", 0.0)
+            total_pnl   = pnl_close + partial_pnl
+            pct         = (exit_p - pos["entry"]) / pos["entry"] * 100 if side == "LONG" \
+                          else (pos["entry"] - exit_p) / pos["entry"] * 100
+            hold_s      = time.time() - pos["open_time"]
+            hold_str    = f"{int(hold_s//60)}m{int(hold_s%60)}s"
+            emoji       = "💰" if total_pnl >= 0 else "💸"
+            be_tag      = "[BE]" if pos.get("be_active") else ""
+            trail_cnt   = pos.get("trail_updates", 0)
+            tp1_c       = pos.get("tp1_count", 0)
+            tp2_c       = pos.get("tp2_count", 0) + (1 if "TP2" in reason else 0)
+
+            # ═══ LAPORAN DETAIL CLOSE ═══════════════════════════════
+            print(f"\n  {'═'*62}")
+            print(f"  {emoji} CLOSE [{symbol}] {side} — {reason}{be_tag}")
+            print(f"  {'═'*62}")
+            print(f"  📍 Entry  : {pos['entry']:.6g}")
+            print(f"  📍 Exit   : {exit_p:.6g} ({pct:+.3f}%)")
+            print(f"  ⏱️  Durasi : {hold_str}")
+            print(f"  💵 PnL Close : {pnl_close:+.4f}U")
+            if partial_pnl != 0:
+                print(f"  💵 PnL Partial (TP1) : {partial_pnl:+.4f}U")
+            print(f"  {'─'*30}")
+            print(f"  💰 TOTAL PnL : {total_pnl:+.4f}U  {'✅ PROFIT' if total_pnl > 0 else '❌ LOSS'}")
+            print(f"  📊 TP1 hits  : {tp1_c}x")
+            print(f"  📊 TP2 hits  : {tp2_c}x")
+            print(f"  📈 Trail updates: {trail_cnt}x (trail jalan {trail_cnt} kali)")
+            print(f"  🏆 Score entry: {pos.get('score',0):.0f}")
+            sigs = pos.get("signals", [])
+            if sigs:
+                print(f"  🔍 Signals : {' | '.join(sigs[:3])}")
+            print(f"  {'═'*62}\n")
+
+            trade_log.append({
+                "symbol": symbol, "side": side,
+                "entry": pos["entry"], "exit": exit_p,
+                "pnl": round(total_pnl, 4), "reason": reason,
+                "hold_sec": int(hold_s),
+                "tp1_count": tp1_c,
+                "tp2_count": tp2_c,
+                "trail_updates": trail_cnt,
+                "score": pos.get("score", 0),
+            })
+            _stats["total_pnl"] += total_pnl
+
+            if total_pnl >= 0:
+                _stats["wins"] += 1
+                if total_pnl > _stats["best_trade"]: _stats["best_trade"] = total_pnl
+            else:
+                _stats["losses"] += 1
+                if total_pnl < _stats["worst_trade"]: _stats["worst_trade"] = total_pnl
+
+            if "TP2"      in reason: _stats["tp2_hits"]     += 1
+            if "SL"       in reason or "Stop" in reason: _stats["sl_hits"] += 1
+            if "Force"    in reason: _stats["force_closes"] += 1
+            if "ZeroLoss" in reason: _stats["zero_loss_cuts"] += 1
+            if "Trail"    in reason: _stats["trail_stops"]   += 1
+
+            print_stats_inline()
+            set_symbol_cooldown(symbol)
+            _hot_symbols.appendleft(symbol)
+
+            # ⚡ LANGSUNG ambil kandidat dari pre-scan queue
+            _trigger_entry_from_queue()
+
         return True
     except Exception as e:
-        print(f"  ❌ [{symbol}] Gagal close: {e}")
+        print(f"  ❌ [{symbol}] Close error: {e}")
         return False
 
-def _update_loss_streak(pnl):
-    global _consec_loss, _in_cooldown
-    if pnl < 0:
-        _consec_loss += 1
-        if _consec_loss >= MAX_CONSEC_LOSS:
-            btc_bad     = _macro["btc_trend_15m"] in COOLDOWN_BTC_BAD
-            breadth_bad = _macro["market_breadth"] < COOLDOWN_BREADTH_MAX
-            if btc_bad or breadth_bad:
-                _in_cooldown = True
-                print(f"  🧊 {MAX_CONSEC_LOSS} loss + market buruk → Cooldown!")
-            else:
-                _consec_loss = 0
-                print(f"  ⚡ {MAX_CONSEC_LOSS} loss tapi market masih oke → lanjut")
-    else:
-        _consec_loss = 0
-        if _in_cooldown:
-            _in_cooldown = False
-            print(f"  ✅ Win! Cooldown diakhiri.")
+
+def _trigger_entry_from_queue():
+    """
+    Segera setelah close, cek apakah ada slot dan kandidat siap.
+    Ambil dari pre-scan queue (zero latency, sudah dianalisis).
+    """
+    time.sleep(RE_SCAN_DELAY_SEC)
+    slots_free = MAX_POSITIONS - len(open_positions)
+    if slots_free <= 0: return
+
+    flash_dir, _ = detect_flash_move()
+    if flash_dir != "none": return
+    if _macro["news"] == "strong_negative": return
+
+    _stats["rescans"] += 1
+    for _ in range(slots_free):
+        if len(open_positions) >= MAX_POSITIONS: break
+        result = get_best_candidate()
+        if result is None:
+            print(f"  ⏳ Queue kosong — menunggu pre-scan mengisi kandidat...")
+            break
+        sym, direction, info = result
+
+        # 🔧 FIX: Re-validasi harga sebelum entry — skip jika drift >PRICE_DRIFT_MAX_PCT
+        current_price   = get_price(sym)
+        cached_price    = info.get("entry_approx", current_price)
+        if cached_price > 0 and current_price > 0:
+            drift = abs(current_price - cached_price) / cached_price
+            if drift > PRICE_DRIFT_MAX_PCT:
+                print(f"  ⚠️ [{sym}] Harga drift {drift*100:.2f}% — kandidat di-skip, hapus dari cache")
+                with _candidate_lock:
+                    _candidate_cache.pop(sym, None)
+                continue
+
+        sig_str = " | ".join(info.get("signals", [])[:3])
+        print(f"  ⚡ QUEUE ENTRY: {sym} {direction} Score:{info['score']:.0f} | {sig_str}")
+        # Run di thread terpisah supaya tidak blocking monitor
+        threading.Thread(target=open_trade, args=(sym, direction, info), daemon=True).start()
+
 
 # ════════════════════════════════════════════════════
-#  POSITION MANAGEMENT
+#  ⚡ POSITION MONITOR v13 (1 detik, zero-loss + instant trail)
 # ════════════════════════════════════════════════════
 def manage_positions():
-    # Flash crash/pump exit
+    if not open_positions: return
     flash_dir, flash_pct = detect_flash_move()
-    if flash_dir != "none" and open_positions:
-        for symbol in list(open_positions.keys()):
-            pos  = open_positions[symbol]
-            side = pos["side"]
-            if flash_dir == "crash" and side == "LONG":
-                close_trade(symbol, f"🚨 Flash Crash -{flash_pct:.2f}%")
-                continue
-            elif flash_dir == "pump" and side == "SHORT":
-                close_trade(symbol, f"🚨 Flash Pump +{flash_pct:.2f}%")
-                continue
 
     for symbol in list(open_positions.keys()):
-        pos   = open_positions[symbol]
+        pos = open_positions.get(symbol)
+        if pos is None: continue
+
         price = get_price(symbol)
-        if price == 0:
-            continue
+        if price == 0: continue
 
-        entry = pos["entry"]
         side  = pos["side"]
+        entry = pos["entry"]
+        hold_min = (time.time() - pos["open_time"]) / 60
 
-        # Force close setelah MAX_HOLDING_MINUTES
-        hold_min = (time.time() - pos.get("open_time", time.time())) / 60
-        if hold_min >= MAX_HOLDING_MINUTES:
-            close_trade(symbol, f"⏰ Force close ({hold_min:.0f}m)")
-            continue
-
-        # Emergency exits
-        if _macro["news"] in ("strong_negative",):
-            close_trade(symbol, "🚨 Bad news emergency")
+        # ── FORCE CLOSE: timeout ─────────────────────────
+        if hold_min >= MAX_HOLDING_MIN:
+            close_trade(symbol, f"⏰Force({hold_min:.0f}m)")
             continue
 
-        if side == "LONG" and _macro["btc_trend_1h"] == "BEAR" and \
-           _macro["btc_trend_4h"] == "BEAR":
-            close_trade(symbol, "⚡ BTC 1H+4H BEAR")
+        # ── FLASH CRASH EXIT ──────────────────────────────
+        if flash_dir == "crash" and side == "LONG":
+            close_trade(symbol, f"⚡FlashCrash-{flash_pct:.1f}%")
             continue
-        if side == "SHORT" and _macro["btc_trend_1h"] == "BULL" and \
-           _macro["btc_trend_4h"] == "BULL":
-            close_trade(symbol, "⚡ BTC 1H+4H BULL")
+        elif flash_dir == "pump" and side == "SHORT":
+            close_trade(symbol, f"⚡FlashPump+{flash_pct:.1f}%")
             continue
+
+        # ════════════════════════════════════════════════
+        # ⚡ ZERO-LOSS TOLERANCE (FITUR UTAMA v13)
+        # Minus satu angka (0.01%) → CUT SEKARANG
+        # ════════════════════════════════════════════════
+        if ZERO_LOSS_ALWAYS and not pos.get("tp1_hit"):
+            zlp = pos["zero_loss_price"]
+            if side == "LONG" and price <= zlp:
+                loss_pct = (entry - price) / entry * 100
+                close_trade(symbol, f"🔴ZeroLoss(-{loss_pct:.3f}%)")
+                continue
+            elif side == "SHORT" and price >= zlp:
+                loss_pct = (price - entry) / entry * 100
+                close_trade(symbol, f"🔴ZeroLoss(-{loss_pct:.3f}%)")
+                continue
 
         if side == "LONG":
             profit_pct = (price - entry) / entry
 
+            # ── Update peak ──────────────────────────────
+            if price > pos["peak"]:
+                pos["peak"] = price
+                if profit_pct > pos.get("trail_max_profit", 0):
+                    pos["trail_max_profit"] = profit_pct
+
+            # ── INSTANT TRAIL ACTIVATION ─────────────────
+            # Profit 0.01% → trail langsung aktif di entry
+            if profit_pct >= PROFIT_TRIGGER_TRAIL:
+                new_trail_sl, trail_dist = calc_trail_sl(pos, price)
+                if new_trail_sl is not None:
+                    old_trail = pos.get("trail_sl")
+                    # Trail hanya naik, TIDAK turun
+                    if old_trail is None or new_trail_sl > old_trail:
+                        pos["trail_sl"]      = new_trail_sl
+                        pos["trail_active"]  = True
+                        pos["trail_updates"] += 1
+
+            # ── TP1: partial close ──────────────────────
             if not pos["tp1_hit"] and price >= pos["tp1"]:
-                partial_close(symbol, "TP1"); continue
+                partial_close_tp1(symbol)
+                continue
 
-            if not pos["trailing_active"] and profit_pct >= TRAIL_TRIGGER:
-                pos["trailing_active"] = True
-                pos["trail_sl"] = price * (1 - TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif +{profit_pct*100:.2f}%")
-
-            if pos["trailing_active"] and price > pos["peak"]:
-                pos["peak"]     = price
-                pos["trail_sl"] = price * (1 - TRAIL_PCT)
-
+            # ── TP2 full close ──────────────────────────
             if pos["tp1_hit"] and price >= pos["tp2"]:
-                close_trade(symbol, "✨ TP2"); continue
+                pos["tp2_count"] = pos.get("tp2_count", 0) + 1
+                close_trade(symbol, "✨TP2")
+                continue
 
-            if pos["trailing_active"] and price <= pos["trail_sl"]:
-                close_trade(symbol, "🔄 Trailing Stop"); continue
+            # ── Trailing stop hit ───────────────────────
+            if pos.get("trail_active") and pos["trail_sl"] is not None:
+                if price <= pos["trail_sl"]:
+                    be_tag = "[BE]" if pos.get("be_active") else ""
+                    if pos.get("be_active"):
+                        close_trade(symbol, f"🔒TrailBE{be_tag}")
+                    else:
+                        close_trade(symbol, f"🔄TrailStop(trail×{pos['trail_updates']}){be_tag}")
+                    continue
 
+            # ── Hard SL (backup kalau trail belum aktif) ─
             if price <= pos["sl"]:
-                reason = "🔒 Break-even" if pos.get("be_active") else "🛑 Stop Loss"
-                close_trade(symbol, reason); continue
+                close_trade(symbol, "🛑SL")
+                continue
 
-            pnl_now = (price - entry) * pos.get("qty_remain", pos["qty"])
-            be_tag  = "[BE]" if pos.get("be_active") else ""
-            tsl     = f" TSL:{pos['trail_sl']:.4f}" if pos["trailing_active"] else ""
-            tp_tag  = f"TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.4f}"
-            print(f"  📌 [{symbol}] LONG @{entry:.4f}→{price:.4f} {be_tag}| "
-                  f"{pnl_now:+.3f}U | {hold_min:.0f}m |{tsl} {tp_tag}")
+            # ── Status print ────────────────────────────
+            trail_info = ""
+            if pos.get("trail_active") and pos["trail_sl"] is not None:
+                trail_pct  = (price - pos["trail_sl"]) / price * 100
+                trail_info = f" | TSL:{pos['trail_sl']:.6g}({trail_pct:.2f}%gap) ×{pos['trail_updates']}"
+            else:
+                trail_info = f" | Trail:WAITING(profit<{PROFIT_TRIGGER_TRAIL*100:.2f}%)"
+            pnl_pct = profit_pct * 100
+            pnl_u   = profit_pct * entry * pos.get("qty_remain", pos["qty"])
+            tp_next = f"TP2:{pos['tp2']:.6g}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.6g}"
+            print(f"  📌 [{symbol}] L@{entry:.5g}→{price:.5g} ({pnl_pct:+.3f}%) "
+                  f"| {pnl_u:+.3f}U | {hold_min:.1f}m{trail_info} | {tp_next}")
 
         else:  # SHORT
             profit_pct = (entry - price) / entry
 
+            if price < pos["peak"]:
+                pos["peak"] = price
+                if profit_pct > pos.get("trail_max_profit", 0):
+                    pos["trail_max_profit"] = profit_pct
+
+            if profit_pct >= PROFIT_TRIGGER_TRAIL:
+                new_trail_sl, trail_dist = calc_trail_sl(pos, price)
+                if new_trail_sl is not None:
+                    old_trail = pos.get("trail_sl")
+                    if old_trail is None or new_trail_sl < old_trail:
+                        pos["trail_sl"]      = new_trail_sl
+                        pos["trail_active"]  = True
+                        pos["trail_updates"] += 1
+
             if not pos["tp1_hit"] and price <= pos["tp1"]:
-                partial_close(symbol, "TP1"); continue
-
-            if not pos["trailing_active"] and profit_pct >= TRAIL_TRIGGER:
-                pos["trailing_active"] = True
-                pos["trail_sl"] = price * (1 + TRAIL_PCT)
-                print(f"  🔄 [{symbol}] Trailing aktif +{profit_pct*100:.2f}%")
-
-            if pos["trailing_active"] and price < pos["peak"]:
-                pos["peak"]     = price
-                pos["trail_sl"] = price * (1 + TRAIL_PCT)
+                partial_close_tp1(symbol)
+                continue
 
             if pos["tp1_hit"] and price <= pos["tp2"]:
-                close_trade(symbol, "✨ TP2"); continue
+                pos["tp2_count"] = pos.get("tp2_count", 0) + 1
+                close_trade(symbol, "✨TP2")
+                continue
 
-            if pos["trailing_active"] and price >= pos["trail_sl"]:
-                close_trade(symbol, "🔄 Trailing Stop"); continue
+            if pos.get("trail_active") and pos["trail_sl"] is not None:
+                if price >= pos["trail_sl"]:
+                    be_tag = "[BE]" if pos.get("be_active") else ""
+                    if pos.get("be_active"):
+                        close_trade(symbol, f"🔒TrailBE{be_tag}")
+                    else:
+                        close_trade(symbol, f"🔄TrailStop(trail×{pos['trail_updates']}){be_tag}")
+                    continue
 
             if price >= pos["sl"]:
-                reason = "🔒 Break-even" if pos.get("be_active") else "🛑 Stop Loss"
-                close_trade(symbol, reason); continue
+                close_trade(symbol, "🛑SL")
+                continue
 
-            pnl_now = (entry - price) * pos.get("qty_remain", pos["qty"])
-            be_tag  = "[BE]" if pos.get("be_active") else ""
-            tsl     = f" TSL:{pos['trail_sl']:.4f}" if pos["trailing_active"] else ""
-            tp_tag  = f"TP2:{pos['tp2']:.4f}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.4f}"
-            print(f"  📌 [{symbol}] SHORT @{entry:.4f}→{price:.4f} {be_tag}| "
-                  f"{pnl_now:+.3f}U | {hold_min:.0f}m |{tsl} {tp_tag}")
+            trail_info = ""
+            if pos.get("trail_active") and pos["trail_sl"] is not None:
+                trail_pct  = (pos["trail_sl"] - price) / price * 100
+                trail_info = f" | TSL:{pos['trail_sl']:.6g}({trail_pct:.2f}%gap) ×{pos['trail_updates']}"
+            else:
+                trail_info = f" | Trail:WAITING"
+            pnl_pct = profit_pct * 100
+            pnl_u   = profit_pct * entry * pos.get("qty_remain", pos["qty"])
+            tp_next = f"TP2:{pos['tp2']:.6g}" if pos["tp1_hit"] else f"TP1:{pos['tp1']:.6g}"
+            print(f"  📌 [{symbol}] S@{entry:.5g}→{price:.5g} ({pnl_pct:+.3f}%) "
+                  f"| {pnl_u:+.3f}U | {hold_min:.1f}m{trail_info} | {tp_next}")
 
-# ════════════════════════════════════════════════════
-#  SUMMARY
-# ════════════════════════════════════════════════════
-def print_summary():
-    if not trade_log:
-        return
-    total = sum(t["pnl"] for t in trade_log)
-    wins  = sum(1 for t in trade_log if t["pnl"] > 0)
-    n     = len(trade_log)
-    wr    = wins / n * 100 if n else 0
-    cd    = f" | 🧊 Cooldown ({cooldown_reason()})" if _in_cooldown else ""
-    print(f"\n  📊 {n} trades | WR:{wr:.0f}% W:{wins} L:{n-wins} | "
-          f"P&L:{total:+.4f}U | streak:{_consec_loss}L{cd}")
-    for t in trade_log[-5:]:
-        e = "🟢" if t["pnl"] > 0 else "🔴"
-        print(f"     {e} {t['symbol']} {t['side']} {t['pnl']:+.4f}U — {t['reason'][:40]}")
 
 # ════════════════════════════════════════════════════
-#  MAIN LOOP
+#  POSITION MONITOR THREAD (1 detik — ultra fast)
+# ════════════════════════════════════════════════════
+def position_monitor_thread():
+    while True:
+        try:
+            if open_positions:
+                manage_positions()
+        except Exception as e:
+            print(f"  ❌ Monitor error: {e}")
+        time.sleep(POSITION_MONITOR_SEC)
+
+
+# ════════════════════════════════════════════════════
+#  STATS
+# ════════════════════════════════════════════════════
+def print_stats_inline():
+    n    = _stats["wins"] + _stats["losses"]
+    wr   = _stats["wins"] / n * 100 if n else 0
+    pnl  = _stats["total_pnl"]
+    sess = (time.time() - _stats["session_start"]) / 3600
+    tph  = n / sess if sess > 0 else 0
+    bar  = ("█" * _stats["wins"] + "░" * _stats["losses"])[-20:]
+    emoji = "💚" if pnl >= 0 else "🔴"
+    print(f"     ┌─ 📊 {n}T | WR:{wr:.0f}% | W:{_stats['wins']} L:{_stats['losses']} | {emoji}PnL:{pnl:+.4f}U | {tph:.0f}T/h")
+    print(f"     └─ TP1:{_stats['tp1_hits']} TP2:{_stats['tp2_hits']} SL:{_stats['sl_hits']} 🔴ZL:{_stats['zero_loss_cuts']} Trail:{_stats['trail_stops']} | Best:{_stats['best_trade']:+.3f} [{bar}]")
+
+def print_stats():
+    n    = _stats["wins"] + _stats["losses"]
+    wr   = _stats["wins"] / n * 100 if n else 0
+    sess = (time.time() - _stats["session_start"]) / 3600
+    tph  = n / sess if sess > 0 else 0
+    pnl  = _stats["total_pnl"]
+    emoji = "💚" if pnl >= 0 else "🔴"
+
+    print(f"\n  {'═'*64}")
+    print(f"  ⚡ SESSION {sess*60:.0f}m | {tph:.0f} trades/jam | Pre-scans: {_stats['rescans']}")
+    print(f"  🎯 {n} trades | WR:{wr:.0f}% | W:{_stats['wins']} L:{_stats['losses']}")
+    print(f"  {emoji} Total P&L : {pnl:+.4f} USDT")
+    print(f"  📈 Best:{_stats['best_trade']:+.4f}U │ 📉 Worst:{_stats['worst_trade']:+.4f}U")
+    print(f"  🎯TP1:{_stats['tp1_hits']} │ ✨TP2:{_stats['tp2_hits']} │ 🛑SL:{_stats['sl_hits']}")
+    print(f"  🔴ZeroLoss:{_stats['zero_loss_cuts']} │ 🔄Trail:{_stats['trail_stops']} │ ⏰Force:{_stats['force_closes']}")
+    if trade_log:
+        print(f"  {'─'*64}")
+        print(f"  📋 Last 5 Trades:")
+        for t in trade_log[-5:]:
+            e    = "🟢" if t["pnl"] > 0 else "🔴"
+            secs = t.get("hold_sec", 0)
+            hold = f"{secs//60}m{secs%60}s"
+            tp1c = t.get("tp1_count", 0)
+            tp2c = t.get("tp2_count", 0)
+            trc  = t.get("trail_updates", 0)
+            print(f"     {e} {t['symbol']:<14} {t['side']} {t['pnl']:+.4f}U ({hold})")
+            print(f"        └─ TP1:{tp1c}x TP2:{tp2c}x Trail:{trc}x — {t['reason'][:30]}")
+    print(f"  {'═'*64}")
+
+
+# ════════════════════════════════════════════════════
+#  MAIN LOOP — ULTRA LIGHTNING v13
 # ════════════════════════════════════════════════════
 def run_bot():
-    print("🤖 Bot Scalping v10 FIXED — 1H Bias | 15m Setup | 5m Entry")
-    print("=" * 68)
-    print(f"   Leverage        : {LEVERAGE}x | Order: ${ORDER_USDT} USDT")
-    print(f"   TF Hierarchy    : 1H(bias) → 15m(setup) → 5m(entry)")
-    print(f"   TP1 / TP2       : {ATR_TP1_MULT}x ATR / {ATR_TP2_MULT}x ATR")
-    print(f"   SL Max          : {MAX_SL_PCT*100:.1f}% | Min R:R = {MIN_RR}x")
-    print(f"   Holding Max     : {MAX_HOLDING_MINUTES} menit (force close)")
-    print(f"   Scan Interval   : {SCAN_INTERVAL}s | Batch: {BATCH_SIZE} simbol")
-    print(f"   Flash Exit      : BTC ≥{FLASH_CRASH_PCT}% dalam {FLASH_WINDOW_SEC//60}m")
-    print(f"   Min Score       : {MIN_COMPOSITE_SCORE}/100 [FIXED dari 52]")
-    print(f"   EMA Touch PCT   : {EMA_TOUCH_PCT*100:.1f}% [FIXED dari 0.8%]")
-    print(f"   Bias Threshold  : {BIAS_THRESHOLD}% [FIXED dari 55%]")
-    print(f"   Base Vol Spike  : {BASE_VOL_SPIKE}x [FIXED dari 1.3x]")
-    print(f"   Score Norm      : max={sum(SCORE_WEIGHTS.values())} [FIXED, bukan *1.5]")
-    print(f"   Total Symbols   : {len(SYMBOLS)}")
-    print("=" * 68 + "\n")
+    print("╔══════════════════════════════════════════════════════════════╗")
+    print("║  ⚡⚡⚡ BOT SCALPING v13.1 — ULTRA LIGHTNING MODE (FIXED)    ║")
+    print("╠══════════════════════════════════════════════════════════════╣")
+    print(f"║  Leverage:{LEVERAGE}x │ Per trade:${ORDER_USDT} │ Max posisi:{MAX_POSITIONS} (fokus!)           ║")
+    print(f"║  TP1:{TP1_PCT*100:.2f}%(60%) │ TP2:{TP2_PCT*100:.2f}% │ SL:{SL_PCT*100:.2f}%                  ║")
+    print(f"║  🔴 ZeroLoss: minus {ZERO_LOSS_TICK_PCT*100:.2f}% (1 tick) → CUT SEKETIKA!     ║")
+    print(f"║  📈 Trail: aktif saat profit {PROFIT_TRIGGER_TRAIL*100:.2f}% (anchor di entry) ║")
+    print(f"║  📈 Trail dinamis: 0→entry lock, 0.3%→0.06%, 0.5%→0.04%  ║")
+    print(f"║  🔮 Pre-scan: {PRE_SCAN_CANDIDATES} kandidat selalu siap di antrian           ║")
+    print(f"║  ⚡ Monitor: setiap {POSITION_MONITOR_SEC} detik (ultra fast!)                  ║")
+    print(f"║  🐛 FIX: Candidate TTL {CANDIDATE_TTL_VALID}s | PreScan {PRE_SCAN_INTERVAL}s | Drift {PRICE_DRIFT_MAX_PCT*100:.1f}%  ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
 
-    symbols = []
-    print("  ⏳ Inisialisasi...")
-    symbols = validate_symbols()
-    for s in symbols:
-        get_sym_info(s)
+    print("\n  ⏳ Validasi symbols...")
+    symbols_active = validate_symbols()
+
+    print(f"  📦 Pre-load symbol info...")
+    with ThreadPoolExecutor(max_workers=15) as ex:
+        list(ex.map(get_sym_info, symbols_active[:50]))
+
+    print(f"  🌐 Refresh macro...")
     refresh_macro()
-    update_btc_price_history()
+    update_btc_price()
 
-    print(f"\n  ✅ Ready | F&G:{_macro['fng']} | "
-          f"BTC 15m:{_macro['btc_trend_15m']} 1H:{_macro['btc_trend_1h']} "
-          f"4H:{_macro['btc_trend_4h']} | Mode:{_macro['scalp_mode']} | "
-          f"News:{_macro['news']}\n")
+    print(f"\n  ✅ {len(symbols_active)} symbols | BTC:{_macro['btc_trend_5m']} | "
+          f"Mode:{_macro['scalp_mode']} | F&G:{_macro['fng']}")
+
+    # ── Warm-up pre-scan queue ────────────────────────────────────
+    print(f"  🔮 Warming up candidate queue (initial scan)...")
+    sample = symbols_active[:30]
+    init_candidates = scan_batch_parallel(sample)
+    if init_candidates:
+        init_candidates.sort(key=lambda x: x[2].get("score", 0), reverse=True)
+        with _candidate_lock:
+            for sym, direction, info in init_candidates:
+                _candidate_cache[sym] = (time.time(), direction, info)
+        print(f"  🎯 {len(init_candidates)} kandidat awal siap!")
+
+    print(f"  🚀 Start dalam 3 detik...\n")
+    time.sleep(3)
+
+    # ── Start dedicated threads ────────────────────────────────────
+    # 1. Position monitor thread (1 detik — ultra fast)
+    pm_thread = threading.Thread(target=position_monitor_thread, daemon=True)
+    pm_thread.start()
+    print("  🔧 Position monitor (1s): START ✅")
+
+    # 2. Background pre-scan engine (maintain candidate queue)
+    ps_thread = threading.Thread(
+        target=pre_scan_engine,
+        args=(symbols_active,),
+        daemon=True)
+    ps_thread.start()
+    print("  🔧 Pre-scan engine: START ✅")
 
     cycle = 0
     while True:
         cycle += 1
         refresh_macro()
-        update_btc_price_history()
-
-        if _in_cooldown:
-            is_cooldown_active()
-
-        manage_positions()
+        update_btc_price()
 
         flash_dir, flash_pct = detect_flash_move()
-        flash_info = f" ⚡{flash_dir.upper()}:{flash_pct:.2f}%" if flash_dir != "none" else ""
-        cd_info    = f" 🧊COOLDOWN" if _in_cooldown else ""
-        mode_emoji = "📈" if _macro["scalp_mode"] == "TREND" else "↩️"
+        flash_info = f"⚡{flash_dir.upper()}:{flash_pct:.1f}%" if flash_dir != "none" else ""
+        mode_e = "📈" if _macro["scalp_mode"] == "TREND" else "↩️"
+        q_size = _candidate_queue.qsize()
 
-        print(f"\n{'='*72}")
+        print(f"\n{'═'*67}")
         print(f"  🔄 #{cycle} {time.strftime('%H:%M:%S')} | F&G:{_macro['fng']}({_macro['fng_label']}) | "
-              f"USDT.D:{_macro['usdt_d']}% | News:{_macro['news']}{cd_info}{flash_info}")
-        print(f"  {mode_emoji} Mode:{_macro['scalp_mode']} | BTC 15m:{_macro['btc_trend_15m']} "
-              f"1H:{_macro['btc_trend_1h']} 4H:{_macro['btc_trend_4h']}")
-        print(f"  🌍 Breadth:{_macro['market_breadth']*100:.0f}% | "
-              f"MCap24h:{_macro['global_mcap_chg']:+.1f}%")
-        for h in _macro["headlines"]:
-            print(f"  {h}")
-        print(f"  📂 Posisi({len(open_positions)}): {list(open_positions.keys()) or '-'}")
+              f"BTC5m:{_macro['btc_trend_5m']} {flash_info}")
+        print(f"  {mode_e} Mode:{_macro['scalp_mode']} | Breadth:{_macro['market_breadth']*100:.0f}% | "
+              f"News:{_macro['news']} | 🔮Queue:{q_size}")
+        print(f"  📂 Posisi({len(open_positions)}/{MAX_POSITIONS}): "
+              f"{list(open_positions.keys()) or '—'}")
 
-        total_batches = math.ceil(len(symbols) / BATCH_SIZE)
-        print(f"  🔍 Scanning batch {_scan_batch_idx + 1}/{total_batches} "
-              f"({BATCH_SIZE} simbol/batch, total {len(symbols)})")
-        print(f"{'='*72}")
+        # Tampilkan kandidat terbaik yang siap
+        with _candidate_lock:
+            now_ts = time.time()
+            fresh = [(sym, ts, d, i) for sym, (ts, d, i) in _candidate_cache.items()
+                     if sym not in open_positions and now_ts - ts < CANDIDATE_TTL_VALID]
+            fresh.sort(key=lambda x: x[3].get("score", 0), reverse=True)
+            if fresh:
+                print(f"  🎯 Top candidates:")
+                for sym, ts, d, i in fresh[:3]:
+                    age  = now_ts - ts
+                    sigs = " | ".join(i.get("signals", [])[:2])
+                    print(f"     ⭐ {sym:14} {d} Score:{i.get('score',0):.0f} ({age:.0f}s ago) | {sigs}")
 
-        candidates = []
-        skipped    = 0
+        slots_free = MAX_POSITIONS - len(open_positions)
 
-        if len(open_positions) < MAX_POSITIONS and not _in_cooldown and \
-           _macro["news"] not in ("strong_negative",):
+        if slots_free > 0 and _macro["news"] != "strong_negative" and \
+           flash_dir == "none" and _macro["market_breadth"] >= MIN_BREADTH:
 
-            batch = get_current_batch([s for s in symbols if s not in open_positions])
+            entries_opened = 0
+            for _ in range(slots_free):
+                if len(open_positions) >= MAX_POSITIONS: break
+                result = get_best_candidate()
+                if result:
+                    sym, direction, info = result
 
-            for symbol in batch:
-                time.sleep(SCAN_DELAY_MS)
-                df = get_ohlcv(symbol, Client.KLINE_INTERVAL_15MINUTE, 220)
-                if df is None or len(df) < 70:
-                    continue
+                    # 🔧 FIX: Re-validasi harga — skip jika drift >PRICE_DRIFT_MAX_PCT
+                    current_price = get_price(sym)
+                    cached_price  = info.get("entry_approx", current_price)
+                    if cached_price > 0 and current_price > 0:
+                        drift = abs(current_price - cached_price) / cached_price
+                        if drift > PRICE_DRIFT_MAX_PCT:
+                            print(f"  ⚠️ [{sym}] Harga drift {drift*100:.2f}% — skip, hapus cache")
+                            with _candidate_lock:
+                                _candidate_cache.pop(sym, None)
+                            continue
 
-                side, sl, tp1, tp2, info = should_enter(symbol, df)
-                if side:
-                    candidates.append((symbol, side, sl, tp1, tp2, info))
+                    sig_str = " | ".join(info.get("signals", [])[:3])
+                    print(f"  ⚡ ENTRY from queue: {sym} {direction} Score:{info['score']:.0f} | {sig_str}")
+                    open_trade(sym, direction, info)
+                    entries_opened += 1
                 else:
-                    skipped += 1
-                    skip_reason = info.get("skip", "?")
-                    if "Candle sama" not in skip_reason and "Data" not in skip_reason:
-                        print(f"     ⚪ {symbol}: {skip_reason}")
+                    print(f"  ⏳ Queue kosong — menunggu pre-scan...")
+                    break
 
-            if candidates:
-                candidates.sort(
-                    key=lambda x: float(x[5].get("score", "0").split("/")[0]),
-                    reverse=True)
-                print(f"\n  🎯 {len(candidates)} setup valid! ({skipped} skip)")
-                for sym, side, sl, tp1, tp2, info in candidates[:3]:
-                    print(f"     ⭐ {sym} {side} | Score:{info.get('score','?')} | "
-                          f"Mode:{info.get('mode','?')} | Bias:{info.get('bias_1h','?')}")
-                    print(f"        5m:{info.get('5m_signals','?')} | "
-                          f"R:R={info.get('rr','?')} | SL:{info.get('sl_pct','?')}")
-                for sym, side, sl, tp1, tp2, info in candidates:
-                    if len(open_positions) >= MAX_POSITIONS:
-                        break
-                    open_trade(sym, side, sl, tp1, tp2, info)
-            else:
-                print(f"  ⏳ Batch selesai, belum ada setup ({len(batch)} simbol di-scan)")
+            if entries_opened == 0 and slots_free > 0:
+                print(f"  ⏳ Tidak ada kandidat fresh saat ini")
         else:
-            if _in_cooldown:
-                print(f"  🧊 Cooldown — {cooldown_reason()}")
+            if slots_free == 0:
+                print(f"  ⏸️  Posisi penuh ({MAX_POSITIONS}/{MAX_POSITIONS})")
+            elif flash_dir != "none":
+                print(f"  ⚡ Flash {flash_dir} — skip entry")
+            elif _macro["market_breadth"] < MIN_BREADTH:
+                print(f"  ⚠️  Breadth rendah ({_macro['market_breadth']*100:.0f}%) — skip")
             else:
-                print(f"  ⏸️  Posisi penuh ({len(open_positions)}/{MAX_POSITIONS})")
+                print(f"  🚫 Bad news — skip entry")
 
-        print_summary()
-        print(f"\n  ⏱️  Next scan: {SCAN_INTERVAL}s...")
+        if cycle % 20 == 0:
+            print_stats()
+
+        print(f"\n  ⏱️  Next scan: {SCAN_INTERVAL}s | "
+              f"ZeroLoss cuts: {_stats['zero_loss_cuts']} | "
+              f"Trail stops: {_stats['trail_stops']}")
         time.sleep(SCAN_INTERVAL)
+
 
 if __name__ == "__main__":
     run_bot()
